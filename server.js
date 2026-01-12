@@ -40,30 +40,33 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// 4. ROUTES
-
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
 
-    // Convert 07... to 2547...
+    // 1. Format Phone to 254... (M-Pesa strictly requires 254 format)
     let formattedPhone = phone;
     if (formattedPhone.startsWith('0')) {
         formattedPhone = '254' + formattedPhone.substring(1);
+    } else if (formattedPhone.startsWith('+')) {
+        formattedPhone = formattedPhone.substring(1);
     }
 
     try {
-        const megapayResponse = await axios.post('https://megapay.co.ke/backend/v1/initiatestk', {
+        // 2. Updated request with 'msisdn' and extra required fields
+        const megapayResponse = await axios.post('https://pay.megapay.co.ke/v1/stk/push', {
             api_key: "MGPYg3eI1jd2", 
             amount: amount,
-            phone: formattedPhone,
-            email: "customer@urbaninvest.com", // ADDED THIS LINE
+            msisdn: formattedPhone, // CHANGED FROM 'phone' TO 'msisdn'
+            phone: formattedPhone,  // Keeping 'phone' as well just in case
+            email: "billing@urbaninvest.com",
             callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
-            description: "Urban Mining Deposit"
+            description: "Account Deposit",
+            reference: "Deposit_" + Date.now() // Some gateways require a unique reference
         });
 
         console.log("MegaPay Response:", megapayResponse.data);
 
-        // MegaPay uses "success" or "ResultCode: '0'" for success
+        // ResultCode '0' or '100' usually means successful initiation
         if (megapayResponse.data.success || megapayResponse.data.ResultCode === '0') {
             res.status(200).json({ status: "Sent" });
         } else {
@@ -72,8 +75,8 @@ app.post('/api/deposit/stk', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error("STK Error:", error.response ? error.response.data : error.message);
-        res.status(500).json({ error: "Server Error" });
+        console.error("STK Request Error:", error.message);
+        res.status(500).json({ error: "Gateway connection error" });
     }
 });
 
