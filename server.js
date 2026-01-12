@@ -41,7 +41,25 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 // 4. ROUTES
-
+// Admin Route: Delete User
+app.post('/api/admin/delete-user', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        await User.findOneAndDelete({ phone: phone });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to delete" });
+    }
+});
+// Get all users for Admin Dashboard
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find({}); // Fetches everything from MongoDB
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch users" });
+    }
+});
 // GET USER PROFILE
 app.get('/api/users/profile', async (req, res) => {
     try {
