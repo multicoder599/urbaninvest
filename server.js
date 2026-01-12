@@ -62,7 +62,7 @@ app.post('/api/deposit/stk', async (req, res) => {
     // We will try the two most likely working endpoints
     const endpoints = [
         'https://api.megapay.africa/v1/stk/push',
-        'https://megapay.africa/api/v1/stk/push'
+        'https://megapay.co.ke/backend/v1/initiatestk'
     ];
 
     for (let url of endpoints) {
