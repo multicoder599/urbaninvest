@@ -40,6 +40,7 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
+// FIXED STK PUSH ROUTE
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
 
@@ -47,6 +48,8 @@ app.post('/api/deposit/stk', async (req, res) => {
     let formattedPhone = phone;
     if (formattedPhone.startsWith('0')) {
         formattedPhone = '254' + formattedPhone.substring(1);
+    } else if (formattedPhone.startsWith('+')) {
+        formattedPhone = formattedPhone.substring(1);
     }
 
     const payload = {
@@ -59,48 +62,55 @@ app.post('/api/deposit/stk', async (req, res) => {
         reference: "UI" + Date.now()
     };
 
-    // We will try the two most likely working endpoints
+    // Updated endpoints based on your latest successful log
     const endpoints = [
-        'https://api.megapay.africa/v1/stk/push',
-        'https://megapay.co.ke/backend/v1/initiatestk'
+        'https://megapay.co.ke/backend/v1/initiatestk',
+        'https://api.megapay.africa/v1/stk/push'
     ];
 
     for (let url of endpoints) {
         try {
             console.log(`Trying MegaPay at: ${url}`);
-            const response = await axios.post(url, payload, { timeout: 5000 });
+            const response = await axios.post(url, payload, { timeout: 10000 });
             
             console.log("MegaPay Response:", response.data);
             
-            if (response.data.success || response.data.ResultCode === '0') {
+            // ResponseCode '0' or success '200' means the prompt was sent
+            if (response.data.ResponseCode === '0' || response.data.success === '200') {
                 return res.status(200).json({ status: "Sent" });
             }
         } catch (error) {
             console.error(`Failed at ${url}:`, error.message);
-            // Continue to the next URL in the list
         }
     }
 
-    // If we reach here, both failed
-    res.status(500).json({ error: "All payment gateways are currently unreachable." });
+    res.status(500).json({ error: "Could not initiate payment. Please try again." });
 });
 
+// FIXED CALLBACK ROUTE (Matches the data you saw on MegaPay)
 app.post('/api/deposit/callback', async (req, res) => {
-    // This matches the exact keys from the MegaPay JSON you provided
-    const { 
-        ResponseDescription, 
-        Msisdn, 
-        TransactionAmount, 
-        TransactionReceipt 
-    } = req.body;
+    const data = req.body;
+    console.log(">>> Incoming Payment Callback:", data);
 
-    console.log(">>> Incoming Payment Callback:", req.body);
+    // MegaPay uses ResponseDescription or ResultDesc to indicate success
+    const isSuccess = (data.ResponseCode === '0' || 
+                       (data.ResponseDescription && data.ResponseDescription.includes('Success')) ||
+                       (data.ResultDesc && data.ResultDesc.includes('processed successfully')));
 
-    // Check if the response says "Success"
-    if (ResponseDescription && ResponseDescription.includes('Success')) {
+    if (isSuccess) {
         try {
+            // Extract values using various possible keys from MegaPay
+            const rawPhone = data.Msisdn || data.phone || data.PhoneNumber;
+            const amount = data.TransactionAmount || data.amount || data.Amount;
+            const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.transaction_id;
+
+            if (!rawPhone) {
+                console.log("❌ Callback error: No phone number found in data");
+                return res.status(200).send("OK"); 
+            }
+
             // Convert 254... to 0... to match your MongoDB records
-            let dbPhone = Msisdn;
+            let dbPhone = rawPhone.toString();
             if (dbPhone.startsWith('254')) {
                 dbPhone = '0' + dbPhone.substring(3);
             }
@@ -108,19 +118,18 @@ app.post('/api/deposit/callback', async (req, res) => {
             const user = await User.findOne({ phone: dbPhone });
             
             if (user) {
-                const amount = parseFloat(TransactionAmount);
-                user.balance = (parseFloat(user.balance) || 0) + amount;
+                const depositAmount = parseFloat(amount);
+                user.balance = (parseFloat(user.balance) || 0) + depositAmount;
                 
-                // Add to transaction history using MegaPay's keys
                 user.transactions.push({
-                    id: TransactionReceipt || 'MP' + Math.floor(Math.random()*1000),
+                    id: receipt || 'MP' + Math.floor(Math.random()*100000),
                     type: 'Deposit',
-                    amount: amount,
+                    amount: depositAmount,
                     date: new Date().toLocaleString()
                 });
 
                 await user.save();
-                console.log(`✅ Balance Updated: KES ${amount} added to ${dbPhone}`);
+                console.log(`✅ Balance Updated: KES ${depositAmount} added to ${dbPhone}`);
             } else {
                 console.log(`❌ User not found for phone: ${dbPhone}`);
             }
@@ -129,11 +138,11 @@ app.post('/api/deposit/callback', async (req, res) => {
         }
     }
     
-    // Always send 200 back to MegaPay so they stop retrying
+    // Always acknowledge with 200 so MegaPay doesn't keep retrying
     res.status(200).send("OK");
 });
 
-// GET USER PROFILE (Single Route)
+// GET USER PROFILE
 app.get('/api/users/profile', async (req, res) => {
     try {
         const phone = req.query.phone;
