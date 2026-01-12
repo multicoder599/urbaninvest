@@ -42,7 +42,6 @@ const User = mongoose.model('User', userSchema);
 
 // 4. ROUTES
 
-// --- UPDATED STK ROUTE ---
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
 
@@ -53,28 +52,28 @@ app.post('/api/deposit/stk', async (req, res) => {
     }
 
     try {
-        // Updated URL to the standard MegaPay Africa endpoint
-        const megapayResponse = await axios.post('https://megapay.co.ke/backend/v1/initiatestk', {
+        const megapayResponse = await axios.post('https://api.megapay.africa/v1/stk/push', {
             api_key: "MGPYg3eI1jd2", 
             amount: amount,
             phone: formattedPhone,
+            email: "customer@urbaninvest.com", // ADDED THIS LINE
             callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
-            description: "Account Deposit"
-        }, { timeout: 10000 }); // 10 second timeout
+            description: "Urban Mining Deposit"
+        });
 
         console.log("MegaPay Response:", megapayResponse.data);
 
-        if (megapayResponse.data.success) {
+        // MegaPay uses "success" or "ResultCode: '0'" for success
+        if (megapayResponse.data.success || megapayResponse.data.ResultCode === '0') {
             res.status(200).json({ status: "Sent" });
         } else {
-            res.status(400).json({ message: megapayResponse.data.message || "STK Failed" });
+            res.status(400).json({ 
+                message: megapayResponse.data.errorMessage || "STK Failed" 
+            });
         }
     } catch (error) {
-        // This will help us see exactly what went wrong in Render logs
-        console.error("STK Connection Error Detail:", error.message);
-        
-        // If the first URL fails, we can try the backup URL
-        res.status(500).json({ error: "Could not reach MegaPay. Please try again in a moment." });
+        console.error("STK Error:", error.response ? error.response.data : error.message);
+        res.status(500).json({ error: "Server Error" });
     }
 });
 
