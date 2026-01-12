@@ -30,14 +30,10 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// 4. STK PUSH ROUTE (Updated Callback URL)
+// 4. STK PUSH ROUTE
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
-
-    let formattedPhone = phone;
-    if (formattedPhone.startsWith('0')) {
-        formattedPhone = '254' + formattedPhone.substring(1);
-    }
+    let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
 
     const payload = {
         api_key: "MGPYg3eI1jd2",
@@ -50,80 +46,106 @@ app.post('/api/deposit/stk', async (req, res) => {
     };
 
     try {
-        // Primary endpoint for MegaPay
         const response = await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload, { timeout: 10000 });
-        
         if (response.data.ResponseCode === '0' || response.data.success === '200') {
             return res.status(200).json({ status: "Sent" });
         } else {
             return res.status(400).json({ error: "Provider declined request" });
         }
     } catch (error) {
-        console.error("STK Error:", error.message);
         res.status(500).json({ error: "Payment gateway unreachable" });
     }
 });
 
-// 5. WEBHOOK CALLBACK (The Fix)
+// 5. WEBHOOK CALLBACK (Deposit)
 app.post('/webhook', async (req, res) => {
-    // 🔥 STEP 1: IMMEDIATELY tell MegaPay we received the data.
-    // This stops the "60-second loading" on their end.
     res.status(200).send("OK");
-
     const data = req.body;
     console.log(">>> WEBHOOK DATA RECEIVED:", JSON.stringify(data));
 
     try {
-        // STEP 2: Verify Success
-        const success =
-            data.ResponseCode == 0 ||
-            data.ResultCode == 0 ||
-            (data.ResultDesc && data.ResultDesc.toLowerCase().includes("success")) ||
-            (data.ResponseDescription && data.ResponseDescription.toLowerCase().includes("success"));
+        const success = data.ResponseCode == 0 || data.ResultCode == 0 || 
+            (data.ResultDesc && data.ResultDesc.toLowerCase().includes("success"));
 
-        if (!success) return console.log("❌ Payment failed according to callback");
+        if (!success) return;
 
-        // STEP 3: Extract Data
         let rawPhone = data.Msisdn || data.phone || data.PhoneNumber;
         const amount = data.TransactionAmount || data.amount || data.Amount;
-        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.transaction_id || data.CheckoutRequestID;
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.CheckoutRequestID;
 
-        if (!rawPhone || !amount) return console.log("❌ Incomplete data in webhook");
-
-        // Convert 254... to 0...
         let dbPhone = rawPhone.toString();
-        if (dbPhone.startsWith('254')) {
-            dbPhone = '0' + dbPhone.substring(3);
-        }
+        if (dbPhone.startsWith('254')) dbPhone = '0' + dbPhone.substring(3);
 
-        // STEP 4: Credit the User
         const user = await User.findOne({ phone: dbPhone });
-
         if (user) {
-            // Prevent double crediting same receipt
             const alreadyExists = user.transactions.some(t => t.id === receipt);
-            if (alreadyExists) return console.log("⚠️ Transaction already processed");
+            if (alreadyExists) return;
 
-            const depositVal = parseFloat(amount);
-            user.balance = (user.balance || 0) + depositVal;
+            user.balance += parseFloat(amount);
             user.transactions.push({
-                id: receipt || "MP" + Date.now(),
+                id: receipt,
                 type: "Deposit",
-                amount: depositVal,
+                amount: parseFloat(amount),
                 date: new Date().toLocaleString()
             });
-
             await user.save();
-            console.log(`✅ SUCCESSFULLY CREDITED: ${dbPhone} with KES ${depositVal}`);
-        } else {
-            console.log(`❌ User NOT FOUND in database: ${dbPhone}`);
+            console.log(`✅ CREDITED: ${dbPhone}`);
         }
-    } catch (err) {
-        console.error("🔥 WEBHOOK PROCESSING ERROR:", err.message);
+    } catch (err) { console.error("Webhook Error:", err.message); }
+});
+
+// 🚀 6. NEW: WITHDRAWAL VIA TELEGRAM (MANUAL)
+app.post('/api/withdraw', async (req, res) => {
+    const { phone, amount } = req.body;
+    const withdrawAmount = parseFloat(amount);
+    const MIN_WITHDRAWAL = 100; // Adjust as needed
+
+    if (withdrawAmount < MIN_WITHDRAWAL) {
+        return res.status(400).json({ error: `Minimum withdrawal is KES ${MIN_WITHDRAWAL}` });
+    }
+
+    try {
+        // Atomic check: Find user and deduct balance if they have enough
+        const user = await User.findOneAndUpdate(
+            { phone: phone, balance: { $gte: withdrawAmount } },
+            { $inc: { balance: -withdrawAmount } },
+            { new: true }
+        );
+
+        if (!user) {
+            return res.status(400).json({ error: "Insufficient balance or user not found" });
+        }
+
+        const transactionId = "WID" + Date.now();
+        
+        // Add pending transaction to user history
+        user.transactions.push({
+            id: transactionId,
+            type: "Withdrawal",
+            amount: withdrawAmount,
+            status: "Pending",
+            date: new Date().toLocaleString()
+        });
+        await user.save();
+
+        // Send Notification to your Telegram
+        const message = `🚀 *WITHDRAWAL REQUEST*\n\n👤 *User:* ${user.fullName}\n📞 *Phone:* ${phone}\n💰 *Amount:* KES ${withdrawAmount}\n🆔 *ID:* ${transactionId}\n\n⚠️ _Pay manually via M-Pesa Till/Paybill._`;
+
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID,
+            text: message,
+            parse_mode: 'Markdown'
+        });
+
+        res.json({ message: "Withdrawal request received and is being processed." });
+
+    } catch (error) {
+        console.error("Withdrawal Error:", error.message);
+        res.status(500).json({ error: "Processing error. Please contact support." });
     }
 });
 
-// --- REST OF YOUR ROUTES ---
+// --- USER ROUTES ---
 
 app.get('/api/users/profile', async (req, res) => {
     try {
@@ -150,4 +172,47 @@ app.post('/api/login', async (req, res) => {
 const PORT = process.env.PORT || 5000; 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
+});
+// --- ADMIN ROUTES ---
+
+// Get all users for admin dashboard
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find({});
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch users" });
+    }
+});
+
+// Mark a withdrawal as Paid
+app.post('/api/admin/mark-paid', async (req, res) => {
+    const { phone, txId } = req.body;
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // Find the transaction and update status
+        const txIndex = user.transactions.findIndex(t => t.id === txId);
+        if (txIndex !== -1) {
+            user.transactions[txIndex].status = "Completed";
+            user.markModified('transactions'); // Important for Mongoose arrays
+            await user.save();
+            res.json({ message: "Transaction marked as Paid" });
+        } else {
+            res.status(404).json({ error: "Transaction not found" });
+        }
+    } catch (err) {
+        res.status(500).json({ error: "Update failed" });
+    }
+});
+
+// Delete a user
+app.post('/api/admin/delete-user', async (req, res) => {
+    try {
+        await User.findOneAndDelete({ phone: req.body.phone });
+        res.json({ message: "User deleted" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete failed" });
+    }
 });
