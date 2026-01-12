@@ -173,6 +173,22 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
+// ADD THIS TO YOUR server.js
+app.post('/api/users/update', async (req, res) => {
+    try {
+        const { phone, withdrawPin } = req.body;
+        const user = await User.findOne({ phone });
+        
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        user.withdrawPin = withdrawPin;
+        await user.save();
+
+        res.json({ message: "Success", withdrawPin: user.withdrawPin });
+    } catch (err) {
+        res.status(500).json({ error: "Database error" });
+    }
+});
 // --- ADMIN ROUTES ---
 
 // Get all users for admin dashboard
