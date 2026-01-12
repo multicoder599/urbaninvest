@@ -52,7 +52,7 @@ app.post('/api/deposit/stk', async (req, res) => {
     }
 
     try {
-        const megapayResponse = await axios.post('https://api.megapay.africa/v1/stk/push', {
+        const megapayResponse = await axios.post('https://megapay.co.ke/backend/v1/initiatestk', {
             api_key: "MGPYg3eI1jd2", 
             amount: amount,
             phone: formattedPhone,
