@@ -53,7 +53,7 @@ app.post('/api/deposit/stk', async (req, res) => {
         api_key: "MGPYg3eI1jd2",
         amount: amount,
         msisdn: formattedPhone,
-        email: "billing@urbaninvest.com",
+        email: "newtonmulti@gmail.com",
         callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
         description: "Deposit",
         reference: "UI" + Date.now()
