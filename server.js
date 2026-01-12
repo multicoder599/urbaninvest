@@ -216,3 +216,22 @@ app.post('/api/admin/delete-user', async (req, res) => {
         res.status(500).json({ error: "Delete failed" });
     }
 });
+// Update user profile (for setting PIN)
+app.post('/api/users/update', async (req, res) => {
+    const { phone, withdrawPin } = req.body;
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        // Update the PIN
+        user.withdrawPin = withdrawPin;
+        await user.save();
+
+        res.json({ message: "Profile updated successfully", withdrawPin: user.withdrawPin });
+    } catch (err) {
+        console.error("Update Error:", err);
+        res.status(500).json({ error: "Server error while saving PIN" });
+    }
+});
