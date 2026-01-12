@@ -32,7 +32,10 @@ const userSchema = new mongoose.Schema({
     referredBy: { type: String, default: null },
     team: { type: Array, default: [] },
     referralBonus: { type: Number, default: 0 },
-    lastSpinDate: { type: Date, default: null } // Added for Bulletproof Spin Logic
+    // SPIN SYSTEM FIELDS
+    lastSpinDate: { type: Date, default: null },
+    freeSpinsUsed: { type: Number, default: 0 },
+    paidSpinsAvailable: { type: Number, default: 0 }
 });
 const User = mongoose.model('User', userSchema);
 
@@ -101,15 +104,17 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// BULLETPROOF UPDATE ROUTE (Handles PIN, Spin, and Balance)
+// BULLETPROOF UPDATE ROUTE (Handles PIN, Balance, and all Spin Logic)
 app.post('/api/users/update', async (req, res) => {
-    const { phone, balance, transactions, lastSpinDate, withdrawPin } = req.body;
+    const { phone, balance, transactions, lastSpinDate, withdrawPin, freeSpinsUsed, paidSpinsAvailable } = req.body;
     try {
         let updateData = {};
         if (balance !== undefined) updateData.balance = balance;
         if (transactions !== undefined) updateData.transactions = transactions;
         if (lastSpinDate !== undefined) updateData.lastSpinDate = lastSpinDate;
         if (withdrawPin !== undefined) updateData.withdrawPin = withdrawPin;
+        if (freeSpinsUsed !== undefined) updateData.freeSpinsUsed = freeSpinsUsed;
+        if (paidSpinsAvailable !== undefined) updateData.paidSpinsAvailable = paidSpinsAvailable;
 
         const user = await User.findOneAndUpdate(
             { phone: phone },
