@@ -85,15 +85,22 @@ app.post('/api/deposit/stk', async (req, res) => {
     res.status(500).json({ error: "All payment gateways are currently unreachable." });
 });
 
-// MegaPay Callback
 app.post('/api/deposit/callback', async (req, res) => {
-    const { status, phone, amount, transaction_id } = req.body;
+    // This matches the exact keys from the MegaPay JSON you provided
+    const { 
+        ResponseDescription, 
+        Msisdn, 
+        TransactionAmount, 
+        TransactionReceipt 
+    } = req.body;
 
-    if (status === 'Success') {
+    console.log(">>> Incoming Payment Callback:", req.body);
+
+    // Check if the response says "Success"
+    if (ResponseDescription && ResponseDescription.includes('Success')) {
         try {
-            // Convert callback phone back to 07... format to match your DB if necessary
-            // Most systems store as 07... if that's what was used at registration
-            let dbPhone = phone;
+            // Convert 254... to 0... to match your MongoDB records
+            let dbPhone = Msisdn;
             if (dbPhone.startsWith('254')) {
                 dbPhone = '0' + dbPhone.substring(3);
             }
@@ -101,22 +108,29 @@ app.post('/api/deposit/callback', async (req, res) => {
             const user = await User.findOne({ phone: dbPhone });
             
             if (user) {
-                user.balance = (parseFloat(user.balance) || 0) + parseFloat(amount);
+                const amount = parseFloat(TransactionAmount);
+                user.balance = (parseFloat(user.balance) || 0) + amount;
+                
+                // Add to transaction history using MegaPay's keys
                 user.transactions.push({
-                    id: transaction_id || 'MP' + Math.floor(Math.random()*1000),
+                    id: TransactionReceipt || 'MP' + Math.floor(Math.random()*1000),
                     type: 'Deposit',
-                    amount: parseFloat(amount),
+                    amount: amount,
                     date: new Date().toLocaleString()
                 });
 
                 await user.save();
-                console.log(`✅ Success: KES ${amount} added to ${dbPhone}`);
+                console.log(`✅ Balance Updated: KES ${amount} added to ${dbPhone}`);
+            } else {
+                console.log(`❌ User not found for phone: ${dbPhone}`);
             }
         } catch (err) {
             console.error("Database error during callback:", err);
         }
     }
-    res.sendStatus(200); 
+    
+    // Always send 200 back to MegaPay so they stop retrying
+    res.status(200).send("OK");
 });
 
 // GET USER PROFILE (Single Route)
