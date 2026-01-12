@@ -43,41 +43,46 @@ const User = mongoose.model('User', userSchema);
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
 
-    // 1. Format Phone to 254... (M-Pesa strictly requires 254 format)
+    // Format Phone to 254...
     let formattedPhone = phone;
     if (formattedPhone.startsWith('0')) {
         formattedPhone = '254' + formattedPhone.substring(1);
-    } else if (formattedPhone.startsWith('+')) {
-        formattedPhone = formattedPhone.substring(1);
     }
 
-    try {
-        // 2. Updated request with 'msisdn' and extra required fields
-        const megapayResponse = await axios.post('https://pay.megapay.co.ke/v1/stk/push', {
-            api_key: "MGPYg3eI1jd2", 
-            amount: amount,
-            msisdn: formattedPhone, // CHANGED FROM 'phone' TO 'msisdn'
-            phone: formattedPhone,  // Keeping 'phone' as well just in case
-            email: "billing@urbaninvest.com",
-            callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
-            description: "Account Deposit",
-            reference: "Deposit_" + Date.now() // Some gateways require a unique reference
-        });
+    const payload = {
+        api_key: "MGPYg3eI1jd2",
+        amount: amount,
+        msisdn: formattedPhone,
+        email: "billing@urbaninvest.com",
+        callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
+        description: "Deposit",
+        reference: "UI" + Date.now()
+    };
 
-        console.log("MegaPay Response:", megapayResponse.data);
+    // We will try the two most likely working endpoints
+    const endpoints = [
+        'https://api.megapay.africa/v1/stk/push',
+        'https://megapay.africa/api/v1/stk/push'
+    ];
 
-        // ResultCode '0' or '100' usually means successful initiation
-        if (megapayResponse.data.success || megapayResponse.data.ResultCode === '0') {
-            res.status(200).json({ status: "Sent" });
-        } else {
-            res.status(400).json({ 
-                message: megapayResponse.data.errorMessage || "STK Failed" 
-            });
+    for (let url of endpoints) {
+        try {
+            console.log(`Trying MegaPay at: ${url}`);
+            const response = await axios.post(url, payload, { timeout: 5000 });
+            
+            console.log("MegaPay Response:", response.data);
+            
+            if (response.data.success || response.data.ResultCode === '0') {
+                return res.status(200).json({ status: "Sent" });
+            }
+        } catch (error) {
+            console.error(`Failed at ${url}:`, error.message);
+            // Continue to the next URL in the list
         }
-    } catch (error) {
-        console.error("STK Request Error:", error.message);
-        res.status(500).json({ error: "Gateway connection error" });
     }
+
+    // If we reach here, both failed
+    res.status(500).json({ error: "All payment gateways are currently unreachable." });
 });
 
 // MegaPay Callback
