@@ -25,7 +25,7 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 3. THE DATA STRUCTURE (Schema Updated for Referrals)
+// 3. THE DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
     phone: { type: String, unique: true, required: true },
@@ -34,7 +34,6 @@ const userSchema = new mongoose.Schema({
     balance: { type: Number, default: 0 },
     miners: { type: Array, default: [] },
     transactions: { type: Array, default: [] },
-    // --- Referral Fields ---
     referredBy: { type: String, default: null },
     team: { type: Array, default: [] },
     referralBonus: { type: Number, default: 0 }
@@ -42,41 +41,56 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 // 4. ROUTES
-// Route to trigger STK Push
+
+// --- FIXED STK ROUTE (WITH PHONE FORMATTING) ---
 app.post('/api/deposit/stk', async (req, res) => {
-    const { phone, amount } = req.body;
+    let { phone, amount } = req.body;
+
+    // Convert 07... or 01... to 2547... or 2541...
+    let formattedPhone = phone;
+    if (formattedPhone.startsWith('0')) {
+        formattedPhone = '254' + formattedPhone.substring(1);
+    }
 
     try {
         const megapayResponse = await axios.post('https://api.megapay.co.ke/v1/stk/push', {
-            api_key: "MGPYg3eI1jd2", // Get this from MegaPay Dashboard
+            api_key: "MGPYg3eI1jd2", 
             amount: amount,
-            phone: phone,
+            phone: formattedPhone,
             callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
             description: "Account Deposit"
         });
 
+        console.log("MegaPay Response:", megapayResponse.data);
+
         if (megapayResponse.data.success) {
             res.status(200).json({ status: "Sent" });
         } else {
-            res.status(400).json({ message: "STK Failed" });
+            res.status(400).json({ message: megapayResponse.data.message || "STK Failed" });
         }
     } catch (error) {
+        console.error("STK Error:", error.response ? error.response.data : error.message);
         res.status(500).json({ error: "Server Error" });
     }
 });
-// MegaPay calls this after the user pays
+
+// MegaPay Callback
 app.post('/api/deposit/callback', async (req, res) => {
     const { status, phone, amount, transaction_id } = req.body;
 
     if (status === 'Success') {
         try {
-            // Find the user in your MongoDB
-            const user = await User.findOne({ phone: phone });
+            // Convert callback phone back to 07... format to match your DB if necessary
+            // Most systems store as 07... if that's what was used at registration
+            let dbPhone = phone;
+            if (dbPhone.startsWith('254')) {
+                dbPhone = '0' + dbPhone.substring(3);
+            }
+
+            const user = await User.findOne({ phone: dbPhone });
             
             if (user) {
                 user.balance = (parseFloat(user.balance) || 0) + parseFloat(amount);
-                
-                // Add to transaction history
                 user.transactions.push({
                     id: transaction_id || 'MP' + Math.floor(Math.random()*1000),
                     type: 'Deposit',
@@ -85,39 +99,57 @@ app.post('/api/deposit/callback', async (req, res) => {
                 });
 
                 await user.save();
-                console.log(`Success: KES ${amount} added to ${phone}`);
+                console.log(`✅ Success: KES ${amount} added to ${dbPhone}`);
             }
         } catch (err) {
             console.error("Database error during callback:", err);
         }
     }
-    res.sendStatus(200); // Tell MegaPay we received the data
+    res.sendStatus(200); 
 });
-// Route to fetch a single user's latest data
+
+// GET USER PROFILE (Single Route)
 app.get('/api/users/profile', async (req, res) => {
     try {
-        // We get the phone number from the URL query (e.g., /api/users/profile?phone=2547...)
         const phone = req.query.phone;
+        if (!phone) return res.status(400).json({ error: "Phone number required" });
 
-        if (!phone) {
-            return res.status(400).json({ error: "Phone number is required" });
-        }
-
-        // Search your MongoDB for this user
         const user = await User.findOne({ phone: phone });
-
         if (user) {
-            // Return the full user object (including the new balance)
             res.json(user);
         } else {
             res.status(404).json({ message: "User not found" });
         }
     } catch (err) {
-        console.error("Profile Fetch Error:", err);
         res.status(500).json({ error: "Internal Server Error" });
     }
 });
-// Admin Route: Delete User
+
+// UPDATE USER DATA
+app.post('/api/users/update', async (req, res) => {
+    const { phone, balance, miners, transactions } = req.body;
+    try {
+        const updatedUser = await User.findOneAndUpdate(
+            { phone: phone },
+            { balance, miners, transactions },
+            { new: true }
+        );
+        res.json(updatedUser);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to sync data" });
+    }
+});
+
+// ADMIN ROUTES
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find({});
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch users" });
+    }
+});
+
 app.post('/api/admin/delete-user', async (req, res) => {
     try {
         const { phone } = req.body;
@@ -127,64 +159,21 @@ app.post('/api/admin/delete-user', async (req, res) => {
         res.status(500).json({ error: "Failed to delete" });
     }
 });
-// Get all users for Admin Dashboard
-app.get('/api/admin/users', async (req, res) => {
-    try {
-        const users = await User.find({}); // Fetches everything from MongoDB
-        res.json(users);
-    } catch (err) {
-        res.status(500).json({ error: "Failed to fetch users" });
-    }
-});
-// GET USER PROFILE
-app.get('/api/users/profile', async (req, res) => {
-    try {
-        const user = await User.findOne({ phone: req.query.phone });
-        if (!user) return res.status(404).json({ error: "User not found" });
-        res.json(user);
-    } catch (err) {
-        res.status(500).json({ error: "Server error" });
-    }
-});
 
-// UPDATE USER DATA (Rentals, Balance, etc.)
-app.post('/api/users/update', async (req, res) => {
-    const { phone, balance, miners, transactions } = req.body;
-    try {
-        const updatedUser = await User.findOneAndUpdate(
-            { phone: phone },
-            { balance, miners, transactions },
-            { new: true }
-        );
-        console.log(`✅ Data synced for: ${phone}`);
-        res.json(updatedUser);
-    } catch (err) {
-        res.status(500).json({ error: "Failed to sync data to database" });
-    }
-});
-
-// REGISTRATION ROUTE (With Referral Logic)
+// REGISTRATION
 app.post('/api/register', async (req, res) => {
     try {
         const { phone, referredBy } = req.body;
-        console.log("Registering user:", phone);
-
-        // 1. Create the new user
         const newUser = new User(req.body);
         await newUser.save();
 
-        // 2. Handle Referral Commission
         if (referredBy && referredBy !== phone) {
             const inviter = await User.findOne({ phone: referredBy });
             if (inviter) {
-                const bonusAmount = 20; // KES 20 Reward
-                
-                // Update inviter's data
+                const bonusAmount = 20; 
                 inviter.team.push(phone); 
                 inviter.balance += bonusAmount;
                 inviter.referralBonus += bonusAmount;
-                
-                // Add transaction history for the inviter
                 inviter.transactions.push({
                     id: 'REF' + Math.floor(Math.random() * 100000),
                     type: 'Referral Bonus',
@@ -192,33 +181,28 @@ app.post('/api/register', async (req, res) => {
                     date: new Date().toLocaleString(),
                     detail: `Invited ${phone}`
                 });
-
                 await inviter.save();
-                console.log(`🎁 Referral bonus of ${bonusAmount} sent to ${referredBy}`);
             }
         }
-
-        console.log("✅ User Saved Successfully!");
         res.status(201).json({ message: "Account Created!" });
     } catch (err) {
-        console.log("❌ Save Error:", err.message);
         res.status(400).json({ error: "Phone number already registered." });
     }
 });
 
-// LOGIN ROUTE
+// LOGIN
 app.post('/api/login', async (req, res) => {
     const { phone, password } = req.body;
     try {
         const user = await User.findOne({ phone, password });
-        if (!user) return res.status(401).json({ error: "Invalid phone or password" });
+        if (!user) return res.status(401).json({ error: "Invalid login" });
         res.json(user);
     } catch (err) {
-        res.status(500).json({ error: "Server error during login" });
+        res.status(500).json({ error: "Server error" });
     }
 });
 
-// Face Data Route (For Face Unlock Sync)
+// Face Data
 app.get('/api/users/faces', async (req, res) => {
     try {
         const users = await User.find({ faceData: { $exists: true, $ne: [] } }, 'phone faceData');
@@ -230,5 +214,5 @@ app.get('/api/users/faces', async (req, res) => {
 
 const PORT = process.env.PORT || 5000; 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
 });
