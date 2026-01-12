@@ -87,60 +87,95 @@ app.post('/api/deposit/stk', async (req, res) => {
     res.status(500).json({ error: "Could not initiate payment. Please try again." });
 });
 
-// FIXED CALLBACK ROUTE (Matches the data you saw on MegaPay)
 app.post('/api/deposit/callback', async (req, res) => {
-    const data = req.body;
-    console.log(">>> Incoming Payment Callback:", data);
 
-    // MegaPay uses ResponseDescription or ResultDesc to indicate success
-    const isSuccess = (data.ResponseCode === '0' || 
-                       (data.ResponseDescription && data.ResponseDescription.includes('Success')) ||
-                       (data.ResultDesc && data.ResultDesc.includes('processed successfully')));
-
-    if (isSuccess) {
-        try {
-            // Extract values using various possible keys from MegaPay
-            const rawPhone = data.Msisdn || data.phone || data.PhoneNumber;
-            const amount = data.TransactionAmount || data.amount || data.Amount;
-            const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.transaction_id;
-
-            if (!rawPhone) {
-                console.log("❌ Callback error: No phone number found in data");
-                return res.status(200).send("OK"); 
-            }
-
-            // Convert 254... to 0... to match your MongoDB records
-            let dbPhone = rawPhone.toString();
-            if (dbPhone.startsWith('254')) {
-                dbPhone = '0' + dbPhone.substring(3);
-            }
-
-            const user = await User.findOne({ phone: dbPhone });
-            
-            if (user) {
-                const depositAmount = parseFloat(amount);
-                user.balance = (parseFloat(user.balance) || 0) + depositAmount;
-                
-                user.transactions.push({
-                    id: receipt || 'MP' + Math.floor(Math.random()*100000),
-                    type: 'Deposit',
-                    amount: depositAmount,
-                    date: new Date().toLocaleString()
-                });
-
-                await user.save();
-                console.log(`✅ Balance Updated: KES ${depositAmount} added to ${dbPhone}`);
-            } else {
-                console.log(`❌ User not found for phone: ${dbPhone}`);
-            }
-        } catch (err) {
-            console.error("Database error during callback:", err);
-        }
-    }
-    
-    // Always acknowledge with 200 so MegaPay doesn't keep retrying
+    // 🔥 INSTANT ACK (MegaPay likes speed)
     res.status(200).send("OK");
+
+    const data = req.body;
+    console.log(">>> CALLBACK:", data);
+
+    try {
+
+        // 🧠 FLEXIBLE SUCCESS CHECK
+        const success =
+            data.ResponseCode == 0 ||
+            data.ResponseCode == '0' ||
+            data.status === 'success' ||
+            data.ResultCode == 0 ||
+            (data.ResultDesc && data.ResultDesc.toLowerCase().includes("success"));
+
+        if (!success) {
+            console.log("❌ Payment not successful");
+            return;
+        }
+
+        // 📲 PHONE EXTRACTION
+        let rawPhone =
+            data.Msisdn ||
+            data.phone ||
+            data.PhoneNumber ||
+            data.CustomerPhoneNumber;
+
+        if (!rawPhone) {
+            console.log("❌ No phone in callback");
+            return;
+        }
+
+        // Convert 254 → 0
+        rawPhone = rawPhone.toString();
+        if (rawPhone.startsWith('254')) {
+            rawPhone = '0' + rawPhone.slice(3);
+        }
+
+        const amount =
+            data.TransactionAmount ||
+            data.amount ||
+            data.Amount ||
+            data.transAmount;
+
+        const receipt =
+            data.TransactionReceipt ||
+            data.MpesaReceiptNumber ||
+            data.transaction_id ||
+            data.checkout_request_id;
+
+        // 🔍 FIND USER
+        const user = await User.findOne({ phone: rawPhone });
+
+        if (!user) {
+            console.log("❌ User not found:", rawPhone);
+            return;
+        }
+
+        // 🚫 PREVENT DOUBLE CREDIT
+        const exists = user.transactions.find(t => t.id == receipt);
+        if (exists) {
+            console.log("⚠ Duplicate transaction ignored");
+            return;
+        }
+
+        // 💰 CREDIT USER
+        const deposit = parseFloat(amount) || 0;
+
+        user.balance = (parseFloat(user.balance) || 0) + deposit;
+
+        user.transactions.push({
+            id: receipt || "MP" + Date.now(),
+            type: "Deposit",
+            amount: deposit,
+            date: new Date()
+        });
+
+        await user.save();
+
+        console.log(`✅ Credited KES ${deposit} → ${rawPhone}`);
+
+    } catch (err) {
+        console.error("🔥 CALLBACK ERROR:", err);
+    }
 });
+
 
 // GET USER PROFILE
 app.get('/api/users/profile', async (req, res) => {
