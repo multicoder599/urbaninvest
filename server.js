@@ -15,12 +15,12 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 3. THE DATA STRUCTURE (Updated with withdrawPin)
+// 3. THE DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
     phone: { type: String, unique: true, required: true },
     password: { type: String, required: true },
-    withdrawPin: { type: String, default: "" }, // Added this
+    withdrawPin: { type: String, default: "" },
     faceData: { type: Array, default: [] },
     balance: { type: Number, default: 0 },
     miners: { type: Array, default: [] },
@@ -31,13 +31,24 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
+// --- ADMIN SECURITY SHIELD ---
+const MASTER_KEY = "901363"; 
+
+// Middleware to protect admin routes
+const checkAuth = (req, res, next) => {
+    const key = req.headers['authorization'];
+    if (key === MASTER_KEY) {
+        next();
+    } else {
+        res.status(401).json({ error: "Unauthorized Access Detected" });
+    }
+};
+
 // --- AUTH & REFERRAL SYSTEM ---
 
 app.post('/api/register', async (req, res) => {
     try {
         const { fullName, phone, password, referralCode } = req.body;
-        
-        // 1. Create the new user
         const newUser = new User({
             fullName,
             phone,
@@ -45,16 +56,13 @@ app.post('/api/register', async (req, res) => {
             referredBy: referralCode || null
         });
 
-        // 2. REFERRAL SYSTEM: Check if someone invited this user
         if (referralCode) {
             const inviter = await User.findOne({ phone: referralCode });
             if (inviter) {
-                const BONUS_AMOUNT = 50; // Set your bonus here (e.g. KES 50)
-                
+                const BONUS_AMOUNT = 50; 
                 inviter.balance += BONUS_AMOUNT;
                 inviter.referralBonus += BONUS_AMOUNT;
                 inviter.team.push({ name: fullName, phone: phone, date: new Date().toLocaleDateString() });
-                
                 inviter.transactions.push({
                     id: "REF" + Date.now(),
                     type: "Referral Bonus",
@@ -62,130 +70,14 @@ app.post('/api/register', async (req, res) => {
                     status: "Completed",
                     date: new Date().toLocaleString()
                 });
-                
                 await inviter.save();
-                console.log(`🎁 Referral bonus sent to ${inviter.phone}`);
             }
         }
-
         await newUser.save();
         res.status(201).json({ message: "Created" });
     } catch (err) { 
         res.status(400).json({ error: "Phone exists or data invalid" }); 
     }
-});
-
-// --- SECURITY & PROFILE UPDATES ---
-
-// Handles both PIN and Password updates
-app.post('/api/users/update', async (req, res) => {
-    const { phone, withdrawPin, password } = req.body;
-    try {
-        const user = await User.findOne({ phone });
-        if (!user) return res.status(404).json({ error: "User not found" });
-
-        if (withdrawPin) user.withdrawPin = withdrawPin;
-        if (password) user.password = password;
-
-        await user.save();
-        res.json({ message: "Updated successfully", user });
-    } catch (err) {
-        res.status(500).json({ error: "Update failed" });
-    }
-});
-
-// --- DEPOSIT & WITHDRAWAL ---
-
-app.post('/api/deposit/stk', async (req, res) => {
-    let { phone, amount } = req.body;
-    let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
-
-    const payload = {
-        api_key: "MGPYg3eI1jd2",
-        amount: amount,
-        msisdn: formattedPhone,
-        email: "newtonmulti@gmail.com",
-        callback_url: "https://urbaninvest.onrender.com/webhook",
-        description: "Deposit",
-        reference: "UI" + Date.now()
-    };
-
-    try {
-        const response = await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload);
-        res.status(200).json({ status: "Sent" });
-    } catch (error) {
-        res.status(500).json({ error: "Gateway error" });
-    }
-});
-
-app.post('/webhook', async (req, res) => {
-    res.status(200).send("OK");
-    const data = req.body;
-    try {
-        const success = data.ResponseCode == 0 || data.ResultCode == 0;
-        if (!success) return;
-
-        let rawPhone = data.Msisdn || data.phone || data.PhoneNumber;
-        const amount = data.TransactionAmount || data.amount || data.Amount;
-        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
-
-        let dbPhone = rawPhone.toString();
-        if (dbPhone.startsWith('254')) dbPhone = '0' + dbPhone.substring(3);
-
-        const user = await User.findOne({ phone: dbPhone });
-        if (user) {
-            user.balance += parseFloat(amount);
-            user.transactions.push({
-                id: receipt,
-                type: "Deposit",
-                amount: parseFloat(amount),
-                status: "Completed",
-                date: new Date().toLocaleString()
-            });
-            await user.save();
-        }
-    } catch (err) { console.error("Webhook Error"); }
-});
-
-app.post('/api/withdraw', async (req, res) => {
-    const { phone, amount } = req.body;
-    const withdrawAmount = parseFloat(amount);
-
-    try {
-        const user = await User.findOneAndUpdate(
-            { phone: phone, balance: { $gte: withdrawAmount } },
-            { $inc: { balance: -withdrawAmount } },
-            { new: true }
-        );
-
-        if (!user) return res.status(400).json({ error: "Insufficient balance" });
-
-        const transactionId = "WID" + Date.now();
-        user.transactions.push({
-            id: transactionId,
-            type: "Withdrawal",
-            amount: withdrawAmount,
-            status: "Pending",
-            date: new Date().toLocaleString()
-        });
-        await user.save();
-
-        const message = `🚀 *WITHDRAWAL REQUEST*\n👤 *User:* ${user.fullName}\n📞 *Phone:* ${phone}\n💰 *Amount:* KES ${withdrawAmount}`;
-        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            chat_id: process.env.TELEGRAM_CHAT_ID,
-            text: message,
-            parse_mode: 'Markdown'
-        });
-
-        res.json({ message: "Processing..." });
-    } catch (error) { res.status(500).send(); }
-});
-
-app.get('/api/users/profile', async (req, res) => {
-    try {
-        const user = await User.findOne({ phone: req.query.phone });
-        user ? res.json(user) : res.status(404).send();
-    } catch (err) { res.status(500).send(); }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -195,14 +87,91 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-const PORT = process.env.PORT || 5000; 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-});
-// --- POWER ADMIN ROUTES ---
+// --- DEPOSIT & WITHDRAWAL ---
 
-// 1. Manually Override User Balance (The "Power" Route)
-app.post('/api/admin/adjust-balance', async (req, res) => {
+app.post('/api/deposit/stk', async (req, res) => {
+    let { phone, amount } = req.body;
+    let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
+    const payload = {
+        api_key: "MGPYg3eI1jd2",
+        amount: amount,
+        msisdn: formattedPhone,
+        email: "newtonmulti@gmail.com",
+        callback_url: "https://urbaninvest.onrender.com/webhook",
+        description: "Deposit",
+        reference: "UI" + Date.now()
+    };
+    try {
+        await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload);
+        res.status(200).json({ status: "Sent" });
+    } catch (error) { res.status(500).json({ error: "Gateway error" }); }
+});
+
+app.post('/webhook', async (req, res) => {
+    res.status(200).send("OK");
+    const data = req.body;
+    try {
+        const success = data.ResponseCode == 0 || data.ResultCode == 0;
+        if (!success) return;
+        let rawPhone = data.Msisdn || data.phone || data.PhoneNumber;
+        const amount = data.TransactionAmount || data.amount || data.Amount;
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
+        let dbPhone = rawPhone.toString();
+        if (dbPhone.startsWith('254')) dbPhone = '0' + dbPhone.substring(3);
+        const user = await User.findOne({ phone: dbPhone });
+        if (user) {
+            user.balance += parseFloat(amount);
+            user.transactions.push({
+                id: receipt, type: "Deposit", amount: parseFloat(amount),
+                status: "Completed", date: new Date().toLocaleString()
+            });
+            await user.save();
+        }
+    } catch (err) { console.error("Webhook Error"); }
+});
+
+app.post('/api/withdraw', async (req, res) => {
+    const { phone, amount } = req.body;
+    const withdrawAmount = parseFloat(amount);
+    try {
+        const user = await User.findOneAndUpdate(
+            { phone: phone, balance: { $gte: withdrawAmount } },
+            { $inc: { balance: -withdrawAmount } },
+            { new: true }
+        );
+        if (!user) return res.status(400).json({ error: "Insufficient balance" });
+        const transactionId = "WID" + Date.now();
+        user.transactions.push({
+            id: transactionId, type: "Withdrawal", amount: withdrawAmount,
+            status: "Pending", date: new Date().toLocaleString()
+        });
+        await user.save();
+        const message = `🚀 *WITHDRAWAL REQUEST*\n👤 *User:* ${user.fullName}\n📞 *Phone:* ${phone}\n💰 *Amount:* KES ${withdrawAmount}`;
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID, text: message, parse_mode: 'Markdown'
+        });
+        res.json({ message: "Processing..." });
+    } catch (error) { res.status(500).send(); }
+});
+
+// --- POWER ADMIN ROUTES (PROTECTED) ---
+
+// 1. Verify terminal key
+app.post('/api/admin/verify', (req, res) => {
+    if (req.body.key === MASTER_KEY) res.sendStatus(200);
+    else res.sendStatus(401);
+});
+
+// 2. Fetch all users for dashboard
+app.get('/api/admin/users', checkAuth, async (req, res) => {
+    try {
+        const users = await User.find({}).sort({ balance: -1 });
+        res.json(users);
+    } catch (err) { res.status(500).json({ error: "Access Denied" }); }
+});
+
+// 3. Adjust balance
+app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
     const { phone, newBal } = req.body;
     try {
         const user = await User.findOneAndUpdate(
@@ -210,48 +179,17 @@ app.post('/api/admin/adjust-balance', async (req, res) => {
             { $set: { balance: parseFloat(newBal) } },
             { new: true }
         );
-        
-        // Add a system correction log to their history
         user.transactions.push({
-            id: "SYS" + Date.now(),
-            type: "System Adjustment",
-            amount: parseFloat(newBal),
-            status: "Completed",
-            date: new Date().toLocaleString()
+            id: "SYS" + Date.now(), type: "System Adjustment", amount: parseFloat(newBal),
+            status: "Completed", date: new Date().toLocaleString()
         });
         await user.save();
-        
-        res.json({ message: "Balance updated by Admin" });
-    } catch (err) {
-        res.status(500).json({ error: "Failed to adjust balance" });
-    }
+        res.json({ message: "Balance updated" });
+    } catch (err) { res.status(500).send(); }
 });
 
-// 2. Fetch All User Data (Sorted by highest balance)
-app.get('/api/admin/users', async (req, res) => {
-    try {
-        const users = await User.find({}).sort({ balance: -1 });
-        res.json(users);
-    } catch (err) {
-        res.status(500).json({ error: "Access Denied" });
-    }
-});
-// DELETE USER PERMANENTLY
-app.post('/api/admin/delete-user', async (req, res) => {
-    const { phone } = req.body;
-    try {
-        const deletedUser = await User.findOneAndDelete({ phone });
-        if (!deletedUser) {
-            return res.status(404).json({ error: "User not found" });
-        }
-        console.log(`🗑️ PERMANENT DELETE: ${phone}`);
-        res.json({ message: "User deleted permanently from database" });
-    } catch (err) {
-        res.status(500).json({ error: "Server error during deletion" });
-    }
-});
-// 1. Mark Withdrawal as Paid (Removes from Queue)
-app.post('/api/admin/mark-paid', async (req, res) => {
+// 4. Mark paid
+app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
     const { phone, txId } = req.body;
     try {
         const user = await User.findOne({ phone });
@@ -263,4 +201,25 @@ app.post('/api/admin/mark-paid', async (req, res) => {
             res.json({ message: "Paid successfully" });
         }
     } catch (err) { res.status(500).send(); }
+});
+
+// 5. Delete user
+app.post('/api/admin/delete-user', checkAuth, async (req, res) => {
+    try {
+        await User.findOneAndDelete({ phone: req.body.phone });
+        res.json({ message: "Deleted" });
+    } catch (err) { res.status(500).send(); }
+});
+
+// --- GENERAL PROFILE ---
+app.get('/api/users/profile', async (req, res) => {
+    try {
+        const user = await User.findOne({ phone: req.query.phone });
+        user ? res.json(user) : res.status(404).send();
+    } catch (err) { res.status(500).send(); }
+});
+
+const PORT = process.env.PORT || 5000; 
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server running on port ${PORT}`);
 });
