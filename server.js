@@ -236,3 +236,31 @@ app.get('/api/admin/users', async (req, res) => {
         res.status(500).json({ error: "Access Denied" });
     }
 });
+// DELETE USER PERMANENTLY
+app.post('/api/admin/delete-user', async (req, res) => {
+    const { phone } = req.body;
+    try {
+        const deletedUser = await User.findOneAndDelete({ phone });
+        if (!deletedUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
+        console.log(`🗑️ PERMANENT DELETE: ${phone}`);
+        res.json({ message: "User deleted permanently from database" });
+    } catch (err) {
+        res.status(500).json({ error: "Server error during deletion" });
+    }
+});
+// 1. Mark Withdrawal as Paid (Removes from Queue)
+app.post('/api/admin/mark-paid', async (req, res) => {
+    const { phone, txId } = req.body;
+    try {
+        const user = await User.findOne({ phone });
+        const tx = user.transactions.find(t => t.id === txId);
+        if (tx) {
+            tx.status = "Completed";
+            user.markModified('transactions');
+            await user.save();
+            res.json({ message: "Paid successfully" });
+        }
+    } catch (err) { res.status(500).send(); }
+});
