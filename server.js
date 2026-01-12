@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const axios = require('axios');
 
 const app = express();
 
@@ -41,6 +42,81 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 // 4. ROUTES
+// Route to trigger STK Push
+app.post('/api/deposit/stk', async (req, res) => {
+    const { phone, amount } = req.body;
+
+    try {
+        const megapayResponse = await axios.post('https://api.megapay.co.ke/v1/stk/push', {
+            api_key: "MGPYg3eI1jd2", // Get this from MegaPay Dashboard
+            amount: amount,
+            phone: phone,
+            callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
+            description: "Account Deposit"
+        });
+
+        if (megapayResponse.data.success) {
+            res.status(200).json({ status: "Sent" });
+        } else {
+            res.status(400).json({ message: "STK Failed" });
+        }
+    } catch (error) {
+        res.status(500).json({ error: "Server Error" });
+    }
+});
+// MegaPay calls this after the user pays
+app.post('/api/deposit/callback', async (req, res) => {
+    const { status, phone, amount, transaction_id } = req.body;
+
+    if (status === 'Success') {
+        try {
+            // Find the user in your MongoDB
+            const user = await User.findOne({ phone: phone });
+            
+            if (user) {
+                user.balance = (parseFloat(user.balance) || 0) + parseFloat(amount);
+                
+                // Add to transaction history
+                user.transactions.push({
+                    id: transaction_id || 'MP' + Math.floor(Math.random()*1000),
+                    type: 'Deposit',
+                    amount: parseFloat(amount),
+                    date: new Date().toLocaleString()
+                });
+
+                await user.save();
+                console.log(`Success: KES ${amount} added to ${phone}`);
+            }
+        } catch (err) {
+            console.error("Database error during callback:", err);
+        }
+    }
+    res.sendStatus(200); // Tell MegaPay we received the data
+});
+// Route to fetch a single user's latest data
+app.get('/api/users/profile', async (req, res) => {
+    try {
+        // We get the phone number from the URL query (e.g., /api/users/profile?phone=2547...)
+        const phone = req.query.phone;
+
+        if (!phone) {
+            return res.status(400).json({ error: "Phone number is required" });
+        }
+
+        // Search your MongoDB for this user
+        const user = await User.findOne({ phone: phone });
+
+        if (user) {
+            // Return the full user object (including the new balance)
+            res.json(user);
+        } else {
+            res.status(404).json({ message: "User not found" });
+        }
+    } catch (err) {
+        console.error("Profile Fetch Error:", err);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+});
 // Admin Route: Delete User
 app.post('/api/admin/delete-user', async (req, res) => {
     try {
