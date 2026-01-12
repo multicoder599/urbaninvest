@@ -7,7 +7,12 @@ const axios = require('axios');
 const app = express();
 
 // 1. MIDDLEWARE
-app.use(cors({ origin: '*', methods: ['GET', 'POST'] })); 
+// Optimized CORS to allow headers used by mobile browsers during PIN setup
+app.use(cors({ 
+    origin: '*', 
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+})); 
 app.use(express.json());       
 
 // 2. DATABASE CONNECTION
@@ -18,7 +23,7 @@ mongoose.connect(process.env.MONGO_URI)
 // 3. THE DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
-    phone: { type: String, unique: true, required: true },
+    phone: { type: String, unique: true, required: true, index: true }, // Added indexing for scale
     password: { type: String, required: true },
     withdrawPin: { type: String, default: "" },
     faceData: { type: Array, default: [] },
@@ -31,20 +36,30 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// --- ADMIN SECURITY SHIELD ---
-const MASTER_KEY = "901363"; 
+// --- ADMIN SECURITY ---
+const MASTER_KEY = process.env.ADMIN_KEY || "901363"; 
 
-// Middleware to protect admin routes
 const checkAuth = (req, res, next) => {
     const key = req.headers['authorization'];
     if (key === MASTER_KEY) {
         next();
     } else {
-        res.status(401).json({ error: "Unauthorized Access Detected" });
+        res.status(401).json({ error: "Unauthorized Access" });
     }
 };
 
-// --- AUTH & REFERRAL SYSTEM ---
+// --- RENDER KEEP-ALIVE (SELF-PING) ---
+// This prevents Render from sleeping by pinging itself every 14 minutes
+const APP_URL = `https://urbaninvest.onrender.com`; 
+setInterval(() => {
+    axios.get(`${APP_URL}/ping`)
+        .then(() => console.log("🛰️ Self-Ping: Stayin' Alive"))
+        .catch((err) => console.log("🛰️ Self-Ping failed, but that's okay."));
+}, 840000); // 14 minutes
+
+app.get('/ping', (req, res) => res.status(200).send("Awake"));
+
+// --- AUTH & PROFILE ROUTES ---
 
 app.post('/api/register', async (req, res) => {
     try {
@@ -87,7 +102,30 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// --- DEPOSIT & WITHDRAWAL ---
+// Update User Profile (Used for setting Withdrawal PIN)
+app.post('/api/users/update', async (req, res) => {
+    const { phone, withdrawPin } = req.body;
+    try {
+        const user = await User.findOneAndUpdate(
+            { phone: phone },
+            { $set: { withdrawPin: withdrawPin } },
+            { new: true }
+        );
+        if (!user) return res.status(404).json({ error: "User not found" });
+        res.json({ message: "Updated successfully", user });
+    } catch (err) {
+        res.status(500).json({ error: "Server update error" });
+    }
+});
+
+app.get('/api/users/profile', async (req, res) => {
+    try {
+        const user = await User.findOne({ phone: req.query.phone });
+        user ? res.json(user) : res.status(404).send();
+    } catch (err) { res.status(500).send(); }
+});
+
+// --- MPESA GATEWAY & WEBHOOK ---
 
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
@@ -97,7 +135,7 @@ app.post('/api/deposit/stk', async (req, res) => {
         amount: amount,
         msisdn: formattedPhone,
         email: "newtonmulti@gmail.com",
-        callback_url: "https://urbaninvest.onrender.com/webhook",
+        callback_url: `${APP_URL}/webhook`,
         description: "Deposit",
         reference: "UI" + Date.now()
     };
@@ -154,15 +192,13 @@ app.post('/api/withdraw', async (req, res) => {
     } catch (error) { res.status(500).send(); }
 });
 
-// --- POWER ADMIN ROUTES (PROTECTED) ---
+// --- ADMIN ROUTES ---
 
-// 1. Verify terminal key
 app.post('/api/admin/verify', (req, res) => {
     if (req.body.key === MASTER_KEY) res.sendStatus(200);
     else res.sendStatus(401);
 });
 
-// 2. Fetch all users for dashboard
 app.get('/api/admin/users', checkAuth, async (req, res) => {
     try {
         const users = await User.find({}).sort({ balance: -1 });
@@ -170,7 +206,6 @@ app.get('/api/admin/users', checkAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Access Denied" }); }
 });
 
-// 3. Adjust balance
 app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
     const { phone, newBal } = req.body;
     try {
@@ -188,7 +223,6 @@ app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// 4. Mark paid
 app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
     const { phone, txId } = req.body;
     try {
@@ -203,19 +237,10 @@ app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// 5. Delete user
 app.post('/api/admin/delete-user', checkAuth, async (req, res) => {
     try {
         await User.findOneAndDelete({ phone: req.body.phone });
         res.json({ message: "Deleted" });
-    } catch (err) { res.status(500).send(); }
-});
-
-// --- GENERAL PROFILE ---
-app.get('/api/users/profile', async (req, res) => {
-    try {
-        const user = await User.findOne({ phone: req.query.phone });
-        user ? res.json(user) : res.status(404).send();
     } catch (err) { res.status(500).send(); }
 });
 
