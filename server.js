@@ -199,3 +199,40 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
+// --- POWER ADMIN ROUTES ---
+
+// 1. Manually Override User Balance (The "Power" Route)
+app.post('/api/admin/adjust-balance', async (req, res) => {
+    const { phone, newBal } = req.body;
+    try {
+        const user = await User.findOneAndUpdate(
+            { phone },
+            { $set: { balance: parseFloat(newBal) } },
+            { new: true }
+        );
+        
+        // Add a system correction log to their history
+        user.transactions.push({
+            id: "SYS" + Date.now(),
+            type: "System Adjustment",
+            amount: parseFloat(newBal),
+            status: "Completed",
+            date: new Date().toLocaleString()
+        });
+        await user.save();
+        
+        res.json({ message: "Balance updated by Admin" });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to adjust balance" });
+    }
+});
+
+// 2. Fetch All User Data (Sorted by highest balance)
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find({}).sort({ balance: -1 });
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: "Access Denied" });
+    }
+});
