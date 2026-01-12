@@ -40,86 +40,31 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// FIXED STK PUSH ROUTE
-app.post('/api/deposit/stk', async (req, res) => {
-    let { phone, amount } = req.body;
-
-    // Format Phone to 254...
-    let formattedPhone = phone;
-    if (formattedPhone.startsWith('0')) {
-        formattedPhone = '254' + formattedPhone.substring(1);
-    } else if (formattedPhone.startsWith('+')) {
-        formattedPhone = formattedPhone.substring(1);
-    }
-
-    const payload = {
-        api_key: "MGPYg3eI1jd2",
-        amount: amount,
-        msisdn: formattedPhone,
-        email: "newtonmulti@gmail.com",
-        callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
-        description: "Deposit",
-        reference: "UI" + Date.now()
-    };
-
-    // Updated endpoints based on your latest successful log
-    const endpoints = [
-        'https://megapay.co.ke/backend/v1/initiatestk',
-        'https://api.megapay.africa/v1/stk/push'
-    ];
-
-    for (let url of endpoints) {
-        try {
-            console.log(`Trying MegaPay at: ${url}`);
-            const response = await axios.post(url, payload, { timeout: 10000 });
-            
-            console.log("MegaPay Response:", response.data);
-            
-            // ResponseCode '0' or success '200' means the prompt was sent
-            if (response.data.ResponseCode === '0' || response.data.success === '200') {
-                return res.status(200).json({ status: "Sent" });
-            }
-        } catch (error) {
-            console.error(`Failed at ${url}:`, error.message);
-        }
-    }
-
-    res.status(500).json({ error: "Could not initiate payment. Please try again." });
-});
-
 app.post('/api/deposit/callback', async (req, res) => {
-
-    // 🔥 INSTANT ACK (MegaPay likes speed)
-    res.status(200).send("OK");
-
     const data = req.body;
-    console.log(">>> CALLBACK:", data);
+    console.log(">>> CALLBACK RECEIVED:", JSON.stringify(data));
 
     try {
-
-        // 🧠 FLEXIBLE SUCCESS CHECK
+        // 1. FLEXIBLE SUCCESS CHECK
         const success =
             data.ResponseCode == 0 ||
             data.ResponseCode == '0' ||
             data.status === 'success' ||
             data.ResultCode == 0 ||
-            (data.ResultDesc && data.ResultDesc.toLowerCase().includes("success"));
+            (data.ResultDesc && data.ResultDesc.toLowerCase().includes("success")) ||
+            (data.ResponseDescription && data.ResponseDescription.toLowerCase().includes("success"));
 
         if (!success) {
-            console.log("❌ Payment not successful");
-            return;
+            console.log("❌ Payment marked as failed by MegaPay");
+            return res.status(200).send("OK"); // Still acknowledge so they stop sending
         }
 
-        // 📲 PHONE EXTRACTION
-        let rawPhone =
-            data.Msisdn ||
-            data.phone ||
-            data.PhoneNumber ||
-            data.CustomerPhoneNumber;
+        // 2. PHONE EXTRACTION
+        let rawPhone = data.Msisdn || data.phone || data.PhoneNumber || data.CustomerPhoneNumber || data.Msisdn_ID;
 
         if (!rawPhone) {
-            console.log("❌ No phone in callback");
-            return;
+            console.log("❌ No phone found in callback data. Available keys:", Object.keys(data));
+            return res.status(200).send("OK");
         }
 
         // Convert 254 → 0
@@ -128,54 +73,48 @@ app.post('/api/deposit/callback', async (req, res) => {
             rawPhone = '0' + rawPhone.slice(3);
         }
 
-        const amount =
-            data.TransactionAmount ||
-            data.amount ||
-            data.Amount ||
-            data.transAmount;
+        const amount = data.TransactionAmount || data.amount || data.Amount || data.transAmount;
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.transaction_id || data.CheckoutRequestID;
 
-        const receipt =
-            data.TransactionReceipt ||
-            data.MpesaReceiptNumber ||
-            data.transaction_id ||
-            data.checkout_request_id;
+        console.log(`🔍 Searching for user: ${rawPhone} to credit KES ${amount}`);
 
-        // 🔍 FIND USER
+        // 3. FIND USER
         const user = await User.findOne({ phone: rawPhone });
 
         if (!user) {
-            console.log("❌ User not found:", rawPhone);
-            return;
+            console.log("❌ User not found in database for phone:", rawPhone);
+            return res.status(200).send("OK");
         }
 
-        // 🚫 PREVENT DOUBLE CREDIT
+        // 4. PREVENT DOUBLE CREDIT
         const exists = user.transactions.find(t => t.id == receipt);
         if (exists) {
-            console.log("⚠ Duplicate transaction ignored");
-            return;
+            console.log("⚠ Duplicate transaction ignored:", receipt);
+            return res.status(200).send("OK");
         }
 
-        // 💰 CREDIT USER
+        // 5. CREDIT USER
         const deposit = parseFloat(amount) || 0;
-
         user.balance = (parseFloat(user.balance) || 0) + deposit;
 
         user.transactions.push({
             id: receipt || "MP" + Date.now(),
             type: "Deposit",
             amount: deposit,
-            date: new Date()
+            date: new Date().toLocaleString()
         });
 
         await user.save();
+        console.log(`✅ SUCCESS: Credited KES ${deposit} to ${rawPhone}. New Balance: ${user.balance}`);
 
-        console.log(`✅ Credited KES ${deposit} → ${rawPhone}`);
+        // 6. FINALLY ACKNOWLEDGE
+        res.status(200).send("OK");
 
     } catch (err) {
         console.error("🔥 CALLBACK ERROR:", err);
+        res.status(500).send("Error");
     }
 });
-
 
 // GET USER PROFILE
 app.get('/api/users/profile', async (req, res) => {
