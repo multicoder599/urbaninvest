@@ -80,75 +80,65 @@ app.post('/api/deposit/stk', async (req, res) => {
     res.status(500).json({ error: "Could not initiate payment." });
 });
 
-// 🔥 FIXED & OPTIMIZED CALLBACK ROUTE
+// 🔥 EMERGENCY FIX FOR CALLBACK (NO HANGING)
 app.post('/api/deposit/callback', async (req, res) => {
+    // 1. ACKNOWLEDGE IMMEDIATELY (Prevents Gateway Timeout)
+    res.status(200).send("OK");
+
     const data = req.body;
     console.log(">>> CALLBACK RECEIVED:", JSON.stringify(data));
 
     try {
-        // 1. QUICK SUCCESS CHECK
+        // 2. CHECK SUCCESS
         const success =
             data.ResponseCode == 0 ||
-            data.ResponseCode == '0' ||
             data.ResultCode == 0 ||
             (data.ResultDesc && data.ResultDesc.toLowerCase().includes("success")) ||
             (data.ResponseDescription && data.ResponseDescription.toLowerCase().includes("success"));
 
-        if (!success) {
-            console.log("❌ Payment failed or cancelled by user");
-            return res.status(200).send("OK"); 
-        }
+        if (!success) return console.log("❌ Payment not successful");
 
-        // 2. EXTRACT DATA
+        // 3. EXTRACT VALUES
         let rawPhone = data.Msisdn || data.phone || data.PhoneNumber || data.CustomerPhoneNumber;
         const amount = data.TransactionAmount || data.amount || data.Amount;
         const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.transaction_id || data.CheckoutRequestID;
 
-        if (!rawPhone || !amount) {
-            console.log("❌ Missing critical data in callback");
-            return res.status(200).send("OK");
-        }
+        if (!rawPhone || !amount) return console.log("❌ Missing Data");
 
-        // Convert 254 → 0
+        // Format to 0...
         rawPhone = rawPhone.toString();
         if (rawPhone.startsWith('254')) {
             rawPhone = '0' + rawPhone.slice(3);
         }
 
-        // 3. ATOMIC UPDATE (Much faster than find + save)
-        // This finds the user and updates their balance in one single database command
-        const updatedUser = await User.findOneAndUpdate(
-            { 
-                phone: rawPhone,
-                "transactions.id": { $ne: receipt } // Prevent double crediting
-            },
-            { 
-                $inc: { balance: parseFloat(amount) },
-                $push: { 
-                    transactions: {
-                        id: receipt,
-                        type: "Deposit",
-                        amount: parseFloat(amount),
-                        date: new Date().toLocaleString()
-                    }
-                }
-            },
-            { new: true }
-        );
+        // 4. FIND & UPDATE (Using findOne + save for maximum stability)
+        const user = await User.findOne({ phone: rawPhone });
 
-        if (updatedUser) {
-            console.log(`✅ SUCCESS: KES ${amount} credited to ${rawPhone}`);
-        } else {
-            console.log(`⚠️ User not found or transaction ${receipt} already processed`);
+        if (!user) {
+            return console.log("❌ User not found:", rawPhone);
         }
 
-        // 4. RESPOND LAST
-        return res.status(200).send("OK");
+        // 5. PREVENT DUPLICATES
+        const isDuplicate = user.transactions.some(t => t.id === receipt);
+        if (isDuplicate) {
+            return console.log("⚠️ Already processed:", receipt);
+        }
+
+        // 6. CREDIT
+        const depositAmount = parseFloat(amount);
+        user.balance = (user.balance || 0) + depositAmount;
+        user.transactions.push({
+            id: receipt || "MP" + Date.now(),
+            type: "Deposit",
+            amount: depositAmount,
+            date: new Date().toLocaleString()
+        });
+
+        await user.save();
+        console.log(`✅ SUCCESS: KES ${depositAmount} credited to ${rawPhone}`);
 
     } catch (err) {
-        console.error("🔥 CALLBACK ERROR:", err);
-        // Still send 200 so MegaPay stops flooding your server with retries
-        res.status(200).send("OK"); 
+        console.error("🔥 CALLBACK ERROR:", err.message);
     }
 });
 
