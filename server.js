@@ -40,30 +40,72 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
+// FIXED STK PUSH ROUTE
+app.post('/api/deposit/stk', async (req, res) => {
+    let { phone, amount } = req.body;
+
+    let formattedPhone = phone;
+    if (formattedPhone.startsWith('0')) {
+        formattedPhone = '254' + formattedPhone.substring(1);
+    } else if (formattedPhone.startsWith('+')) {
+        formattedPhone = formattedPhone.substring(1);
+    }
+
+    const payload = {
+        api_key: "MGPYg3eI1jd2",
+        amount: amount,
+        msisdn: formattedPhone,
+        email: "newtonmulti@gmail.com",
+        callback_url: "https://urbaninvest.onrender.com/api/deposit/callback",
+        description: "Deposit",
+        reference: "UI" + Date.now()
+    };
+
+    const endpoints = [
+        'https://megapay.co.ke/backend/v1/initiatestk',
+        'https://api.megapay.africa/v1/stk/push'
+    ];
+
+    for (let url of endpoints) {
+        try {
+            console.log(`Trying MegaPay at: ${url}`);
+            const response = await axios.post(url, payload, { timeout: 10000 });
+            if (response.data.ResponseCode === '0' || response.data.success === '200') {
+                return res.status(200).json({ status: "Sent" });
+            }
+        } catch (error) {
+            console.error(`Failed at ${url}:`, error.message);
+        }
+    }
+    res.status(500).json({ error: "Could not initiate payment." });
+});
+
+// 🔥 FIXED & OPTIMIZED CALLBACK ROUTE
 app.post('/api/deposit/callback', async (req, res) => {
     const data = req.body;
     console.log(">>> CALLBACK RECEIVED:", JSON.stringify(data));
 
     try {
-        // 1. FLEXIBLE SUCCESS CHECK
+        // 1. QUICK SUCCESS CHECK
         const success =
             data.ResponseCode == 0 ||
             data.ResponseCode == '0' ||
-            data.status === 'success' ||
             data.ResultCode == 0 ||
             (data.ResultDesc && data.ResultDesc.toLowerCase().includes("success")) ||
             (data.ResponseDescription && data.ResponseDescription.toLowerCase().includes("success"));
 
         if (!success) {
-            console.log("❌ Payment marked as failed by MegaPay");
-            return res.status(200).send("OK"); // Still acknowledge so they stop sending
+            console.log("❌ Payment failed or cancelled by user");
+            return res.status(200).send("OK"); 
         }
 
-        // 2. PHONE EXTRACTION
-        let rawPhone = data.Msisdn || data.phone || data.PhoneNumber || data.CustomerPhoneNumber || data.Msisdn_ID;
+        // 2. EXTRACT DATA
+        let rawPhone = data.Msisdn || data.phone || data.PhoneNumber || data.CustomerPhoneNumber;
+        const amount = data.TransactionAmount || data.amount || data.Amount;
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.transaction_id || data.CheckoutRequestID;
 
-        if (!rawPhone) {
-            console.log("❌ No phone found in callback data. Available keys:", Object.keys(data));
+        if (!rawPhone || !amount) {
+            console.log("❌ Missing critical data in callback");
             return res.status(200).send("OK");
         }
 
@@ -73,46 +115,40 @@ app.post('/api/deposit/callback', async (req, res) => {
             rawPhone = '0' + rawPhone.slice(3);
         }
 
-        const amount = data.TransactionAmount || data.amount || data.Amount || data.transAmount;
-        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber || data.transaction_id || data.CheckoutRequestID;
+        // 3. ATOMIC UPDATE (Much faster than find + save)
+        // This finds the user and updates their balance in one single database command
+        const updatedUser = await User.findOneAndUpdate(
+            { 
+                phone: rawPhone,
+                "transactions.id": { $ne: receipt } // Prevent double crediting
+            },
+            { 
+                $inc: { balance: parseFloat(amount) },
+                $push: { 
+                    transactions: {
+                        id: receipt,
+                        type: "Deposit",
+                        amount: parseFloat(amount),
+                        date: new Date().toLocaleString()
+                    }
+                }
+            },
+            { new: true }
+        );
 
-        console.log(`🔍 Searching for user: ${rawPhone} to credit KES ${amount}`);
-
-        // 3. FIND USER
-        const user = await User.findOne({ phone: rawPhone });
-
-        if (!user) {
-            console.log("❌ User not found in database for phone:", rawPhone);
-            return res.status(200).send("OK");
+        if (updatedUser) {
+            console.log(`✅ SUCCESS: KES ${amount} credited to ${rawPhone}`);
+        } else {
+            console.log(`⚠️ User not found or transaction ${receipt} already processed`);
         }
 
-        // 4. PREVENT DOUBLE CREDIT
-        const exists = user.transactions.find(t => t.id == receipt);
-        if (exists) {
-            console.log("⚠ Duplicate transaction ignored:", receipt);
-            return res.status(200).send("OK");
-        }
-
-        // 5. CREDIT USER
-        const deposit = parseFloat(amount) || 0;
-        user.balance = (parseFloat(user.balance) || 0) + deposit;
-
-        user.transactions.push({
-            id: receipt || "MP" + Date.now(),
-            type: "Deposit",
-            amount: deposit,
-            date: new Date().toLocaleString()
-        });
-
-        await user.save();
-        console.log(`✅ SUCCESS: Credited KES ${deposit} to ${rawPhone}. New Balance: ${user.balance}`);
-
-        // 6. FINALLY ACKNOWLEDGE
-        res.status(200).send("OK");
+        // 4. RESPOND LAST
+        return res.status(200).send("OK");
 
     } catch (err) {
         console.error("🔥 CALLBACK ERROR:", err);
-        res.status(500).send("Error");
+        // Still send 200 so MegaPay stops flooding your server with retries
+        res.status(200).send("OK"); 
     }
 });
 
@@ -121,13 +157,9 @@ app.get('/api/users/profile', async (req, res) => {
     try {
         const phone = req.query.phone;
         if (!phone) return res.status(400).json({ error: "Phone number required" });
-
         const user = await User.findOne({ phone: phone });
-        if (user) {
-            res.json(user);
-        } else {
-            res.status(404).json({ message: "User not found" });
-        }
+        if (user) res.json(user);
+        else res.status(404).json({ message: "User not found" });
     } catch (err) {
         res.status(500).json({ error: "Internal Server Error" });
     }
