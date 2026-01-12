@@ -7,7 +7,6 @@ const axios = require('axios');
 const app = express();
 
 // 1. MIDDLEWARE
-// Optimized CORS to allow headers used by mobile browsers during PIN setup
 app.use(cors({ 
     origin: '*', 
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -23,7 +22,7 @@ mongoose.connect(process.env.MONGO_URI)
 // 3. THE DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
-    phone: { type: String, unique: true, required: true, index: true }, // Added indexing for scale
+    phone: { type: String, unique: true, required: true, index: true },
     password: { type: String, required: true },
     withdrawPin: { type: String, default: "" },
     faceData: { type: Array, default: [] },
@@ -32,7 +31,8 @@ const userSchema = new mongoose.Schema({
     transactions: { type: Array, default: [] },
     referredBy: { type: String, default: null },
     team: { type: Array, default: [] },
-    referralBonus: { type: Number, default: 0 }
+    referralBonus: { type: Number, default: 0 },
+    lastSpinDate: { type: Date, default: null } // Added for Bulletproof Spin Logic
 });
 const User = mongoose.model('User', userSchema);
 
@@ -48,14 +48,13 @@ const checkAuth = (req, res, next) => {
     }
 };
 
-// --- RENDER KEEP-ALIVE (SELF-PING) ---
-// This prevents Render from sleeping by pinging itself every 14 minutes
+// --- RENDER KEEP-ALIVE ---
 const APP_URL = `https://urbaninvest.onrender.com`; 
 setInterval(() => {
     axios.get(`${APP_URL}/ping`)
         .then(() => console.log("🛰️ Self-Ping: Stayin' Alive"))
-        .catch((err) => console.log("🛰️ Self-Ping failed, but that's okay."));
-}, 840000); // 14 minutes
+        .catch((err) => console.log("🛰️ Self-Ping failed"));
+}, 840000); 
 
 app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
@@ -102,17 +101,24 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// Update User Profile (Used for setting Withdrawal PIN)
+// BULLETPROOF UPDATE ROUTE (Handles PIN, Spin, and Balance)
 app.post('/api/users/update', async (req, res) => {
-    const { phone, withdrawPin } = req.body;
+    const { phone, balance, transactions, lastSpinDate, withdrawPin } = req.body;
     try {
+        let updateData = {};
+        if (balance !== undefined) updateData.balance = balance;
+        if (transactions !== undefined) updateData.transactions = transactions;
+        if (lastSpinDate !== undefined) updateData.lastSpinDate = lastSpinDate;
+        if (withdrawPin !== undefined) updateData.withdrawPin = withdrawPin;
+
         const user = await User.findOneAndUpdate(
             { phone: phone },
-            { $set: { withdrawPin: withdrawPin } },
+            { $set: updateData },
             { new: true }
         );
+
         if (!user) return res.status(404).json({ error: "User not found" });
-        res.json({ message: "Updated successfully", user });
+        res.json(user);
     } catch (err) {
         res.status(500).json({ error: "Server update error" });
     }
