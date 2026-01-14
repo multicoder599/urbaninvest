@@ -104,9 +104,15 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// BULLETPROOF UPDATE ROUTE (Handles PIN, Balance, and all Spin Logic)
+// BULLETPROOF UPDATE ROUTE (Now correctly handles Miners and Team data)
 app.post('/api/users/update', async (req, res) => {
-    const { phone, balance, transactions, lastSpinDate, withdrawPin, freeSpinsUsed, paidSpinsAvailable } = req.body;
+    // 1. ADD 'miners' and 'team' to the destructuring list below
+    const { 
+        phone, balance, transactions, lastSpinDate, 
+        withdrawPin, freeSpinsUsed, paidSpinsAvailable, 
+        miners, team 
+    } = req.body;
+
     try {
         let updateData = {};
         if (balance !== undefined) updateData.balance = balance;
@@ -115,6 +121,10 @@ app.post('/api/users/update', async (req, res) => {
         if (withdrawPin !== undefined) updateData.withdrawPin = withdrawPin;
         if (freeSpinsUsed !== undefined) updateData.freeSpinsUsed = freeSpinsUsed;
         if (paidSpinsAvailable !== undefined) updateData.paidSpinsAvailable = paidSpinsAvailable;
+        
+        // 2. CRITICAL: Added these two lines to save your investments!
+        if (miners !== undefined) updateData.miners = miners;
+        if (team !== undefined) updateData.team = team;
 
         const user = await User.findOneAndUpdate(
             { phone: phone },
@@ -125,8 +135,10 @@ app.post('/api/users/update', async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found" });
         res.json(user);
     } catch (err) {
+        console.error("Update Error:", err);
         res.status(500).json({ error: "Server update error" });
     }
+
 });
 
 app.get('/api/users/profile', async (req, res) => {
