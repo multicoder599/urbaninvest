@@ -32,12 +32,22 @@ const userSchema = new mongoose.Schema({
     referredBy: { type: String, default: null },
     team: { type: Array, default: [] },
     referralBonus: { type: Number, default: 0 },
-    // SPIN SYSTEM FIELDS
     lastSpinDate: { type: Date, default: null },
     freeSpinsUsed: { type: Number, default: 0 },
     paidSpinsAvailable: { type: Number, default: 0 }
 });
 const User = mongoose.model('User', userSchema);
+
+// --- TELEGRAM HELPER ---
+const sendTelegram = async (msg) => {
+    try {
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID,
+            text: msg,
+            parse_mode: 'HTML'
+        });
+    } catch (e) { console.error("Telegram Error"); }
+};
 
 // --- ADMIN SECURITY ---
 const MASTER_KEY = process.env.ADMIN_KEY || "901363"; 
@@ -104,9 +114,7 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// BULLETPROOF UPDATE ROUTE (Now correctly handles Miners and Team data)
 app.post('/api/users/update', async (req, res) => {
-    // 1. ADD 'miners' and 'team' to the destructuring list below
     const { 
         phone, balance, transactions, lastSpinDate, 
         withdrawPin, freeSpinsUsed, paidSpinsAvailable, 
@@ -121,8 +129,6 @@ app.post('/api/users/update', async (req, res) => {
         if (withdrawPin !== undefined) updateData.withdrawPin = withdrawPin;
         if (freeSpinsUsed !== undefined) updateData.freeSpinsUsed = freeSpinsUsed;
         if (paidSpinsAvailable !== undefined) updateData.paidSpinsAvailable = paidSpinsAvailable;
-        
-        // 2. CRITICAL: Added these two lines to save your investments!
         if (miners !== undefined) updateData.miners = miners;
         if (team !== undefined) updateData.team = team;
 
@@ -135,10 +141,8 @@ app.post('/api/users/update', async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found" });
         res.json(user);
     } catch (err) {
-        console.error("Update Error:", err);
         res.status(500).json({ error: "Server update error" });
     }
-
 });
 
 app.get('/api/users/profile', async (req, res) => {
@@ -154,7 +158,7 @@ app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
     let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
     const payload = {
-        api_key: "MGPY26G5iWPw",
+        api_key: "MGPY26G5iWPw", // Replace with your actual MegaPay key
         amount: amount,
         msisdn: formattedPhone,
         email: "kanyingiwaitara@gmail.com",
@@ -174,11 +178,14 @@ app.post('/webhook', async (req, res) => {
     try {
         const success = data.ResponseCode == 0 || data.ResultCode == 0;
         if (!success) return;
+        
         let rawPhone = data.Msisdn || data.phone || data.PhoneNumber;
         const amount = data.TransactionAmount || data.amount || data.Amount;
         const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
+        
         let dbPhone = rawPhone.toString();
         if (dbPhone.startsWith('254')) dbPhone = '0' + dbPhone.substring(3);
+
         const user = await User.findOne({ phone: dbPhone });
         if (user) {
             user.balance += parseFloat(amount);
@@ -187,8 +194,36 @@ app.post('/webhook', async (req, res) => {
                 status: "Completed", date: new Date().toLocaleString()
             });
             await user.save();
+            
+            // Notification
+            sendTelegram(`<b>✅ STK SUCCESS</b>\n👤 ${user.fullName}\n📞 ${dbPhone}\n💰 KES ${amount}\n📄 ${receipt}`);
         }
     } catch (err) { console.error("Webhook Error"); }
+});
+
+// --- MANUAL DEPOSIT VERIFICATION ---
+app.post('/api/deposit/verify-manual', async (req, res) => {
+    const { phone, transactionId } = req.body;
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).send();
+
+        // Check if transaction ID already exists to prevent double claims
+        const exists = user.transactions.some(t => t.id === transactionId);
+        if (exists) return res.status(400).json({ error: "Code already used" });
+
+        user.transactions.push({
+            id: transactionId,
+            type: "Manual Deposit",
+            amount: 0, // Admin will set this during approval
+            status: "Pending",
+            date: new Date().toLocaleString()
+        });
+        await user.save();
+
+        sendTelegram(`<b>📩 MANUAL DEPOSIT CLAIM</b>\n👤 ${user.fullName}\n📞 ${phone}\n🔑 Code: ${transactionId}\n<i>Check M-Pesa and approve in Admin.</i>`);
+        res.json({ message: "Submitted" });
+    } catch (e) { res.status(500).send(); }
 });
 
 app.post('/api/withdraw', async (req, res) => {
@@ -201,16 +236,15 @@ app.post('/api/withdraw', async (req, res) => {
             { new: true }
         );
         if (!user) return res.status(400).json({ error: "Insufficient balance" });
+        
         const transactionId = "WID" + Date.now();
         user.transactions.push({
             id: transactionId, type: "Withdrawal", amount: withdrawAmount,
             status: "Pending", date: new Date().toLocaleString()
         });
         await user.save();
-        const message = `🚀 *WITHDRAWAL REQUEST*\n👤 *User:* ${user.fullName}\n📞 *Phone:* ${phone}\n💰 *Amount:* KES ${withdrawAmount}`;
-        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            chat_id: process.env.TELEGRAM_CHAT_ID, text: message, parse_mode: 'Markdown'
-        });
+        
+        sendTelegram(`🚀 <b>WITHDRAWAL REQUEST</b>\n👤 ${user.fullName}\n📞 ${phone}\n💰 KES ${withdrawAmount}`);
         res.json({ message: "Processing..." });
     } catch (error) { res.status(500).send(); }
 });
@@ -230,32 +264,40 @@ app.get('/api/admin/users', checkAuth, async (req, res) => {
 });
 
 app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
-    const { phone, newBal } = req.body;
+    const { phone, newBal, type } = req.body;
     try {
-        const user = await User.findOneAndUpdate(
-            { phone },
-            { $set: { balance: parseFloat(newBal) } },
-            { new: true }
-        );
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).send();
+
+        user.balance = parseFloat(newBal);
         user.transactions.push({
-            id: "SYS" + Date.now(), type: "System Adjustment", amount: parseFloat(newBal),
-            status: "Completed", date: new Date().toLocaleString()
+            id: "SYS" + Date.now(), 
+            type: type || "System Adjustment", 
+            amount: parseFloat(newBal),
+            status: "Completed", 
+            date: new Date().toLocaleString()
         });
         await user.save();
         res.json({ message: "Balance updated" });
     } catch (err) { res.status(500).send(); }
 });
 
+// Used to approve Pending Manual Deposits or Withdrawals
 app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
-    const { phone, txId } = req.body;
+    const { phone, txId, actualAmount } = req.body;
     try {
         const user = await User.findOne({ phone });
         const tx = user.transactions.find(t => t.id === txId);
         if (tx) {
             tx.status = "Completed";
+            // If it was a manual deposit, update the actual amount confirmed from M-Pesa
+            if (tx.type === "Manual Deposit" && actualAmount) {
+                tx.amount = parseFloat(actualAmount);
+                user.balance += parseFloat(actualAmount);
+            }
             user.markModified('transactions');
             await user.save();
-            res.json({ message: "Paid successfully" });
+            res.json({ message: "Updated successfully" });
         }
     } catch (err) { res.status(500).send(); }
 });
