@@ -154,10 +154,10 @@ app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
     let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
     const payload = {
-        api_key: "MGPYg3eI1jd2",
+        api_key: "MGPY26G5iWPw",
         amount: amount,
         msisdn: formattedPhone,
-        email: "newtonmulti@gmail.com",
+        email: "kanyingiwaitara@gmail.com",
         callback_url: `${APP_URL}/webhook`,
         description: "Deposit",
         reference: "UI" + Date.now()
