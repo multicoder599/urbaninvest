@@ -19,20 +19,20 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 3. THE DATA STRUCTURE (Updated for 3-Levels)
+// 3. DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
     phone: { type: String, unique: true, required: true, index: true },
     password: { type: String, required: true },
     withdrawPin: { type: String, default: "" },
     faceData: { type: Array, default: [] },
-    balance: { type: Number, default: 50 }, // Default Signup Bonus
+    balance: { type: Number, default: 50 }, 
     miners: { type: Array, default: [] },
     transactions: { type: Array, default: [] },
     referredBy: { type: String, default: null },
-    team: { type: Array, default: [] },    // Level 1
-    teamL2: { type: Array, default: [] },  // Level 2
-    teamL3: { type: Array, default: [] },  // Level 3
+    team: { type: Array, default: [] },    
+    teamL2: { type: Array, default: [] },  
+    teamL3: { type: Array, default: [] },  
     referralBonus: { type: Number, default: 0 },
     lastSpinDate: { type: Date, default: null },
     freeSpinsUsed: { type: Number, default: 0 },
@@ -40,15 +40,21 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// --- TELEGRAM HELPER ---
-const sendTelegram = async (msg) => {
+// --- FLEXIBLE TELEGRAM HELPER (Dual Bot Support) ---
+const sendTelegram = async (msg, type = 'main') => {
     try {
-        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            chat_id: process.env.TELEGRAM_CHAT_ID,
+        // Choose credentials based on type
+        const token = type === 'user' ? process.env.USER_BOT_TOKEN : process.env.TELEGRAM_BOT_TOKEN;
+        const chatId = type === 'user' ? process.env.USER_CHAT_ID : process.env.TELEGRAM_CHAT_ID;
+
+        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+            chat_id: chatId,
             text: msg,
             parse_mode: 'HTML'
         });
-    } catch (e) { console.error("Telegram Error"); }
+    } catch (e) { 
+        console.error(`Telegram Error (${type}):`, e.response?.data || e.message); 
+    }
 };
 
 // --- ADMIN SECURITY ---
@@ -67,20 +73,16 @@ setInterval(() => {
 
 app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
-// --- UPDATED REGISTRATION (3-LEVEL LOGIC) ---
-
+// --- REGISTRATION WITH SECOND BOT NOTIFICATION ---
 app.post('/api/register', async (req, res) => {
     try {
         const { fullName, phone, password, referredBy, faceData } = req.body;
 
-        // 1. Create the new user with KES 50 bonus
         const newUser = new User({
-            fullName,
-            phone,
-            password,
+            fullName, phone, password,
             faceData: faceData || [],
             referredBy: referredBy || null,
-            balance: 50, // Initial Bonus
+            balance: 50, 
             transactions: [{
                 id: "WELCOME" + Date.now(),
                 type: "Signup Bonus",
@@ -90,22 +92,18 @@ app.post('/api/register', async (req, res) => {
             }]
         });
 
-        // 2. Handle the Referral Chain
         if (referredBy) {
-            // --- LEVEL 1 PARENT ---
             const parentL1 = await User.findOne({ phone: referredBy });
             if (parentL1) {
                 parentL1.team.push({ name: fullName, phone: phone, date: new Date().toLocaleDateString() });
                 await parentL1.save();
 
-                // --- LEVEL 2 PARENT (The person who invited L1) ---
                 if (parentL1.referredBy) {
                     const parentL2 = await User.findOne({ phone: parentL1.referredBy });
                     if (parentL2) {
                         parentL2.teamL2.push({ name: fullName, phone: phone, from: parentL1.fullName });
                         await parentL2.save();
 
-                        // --- LEVEL 3 PARENT (The person who invited L2) ---
                         if (parentL2.referredBy) {
                             const parentL3 = await User.findOne({ phone: parentL2.referredBy });
                             if (parentL3) {
@@ -120,17 +118,20 @@ app.post('/api/register', async (req, res) => {
 
         await newUser.save();
         
-        sendTelegram(`<b>🆕 NEW USER</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref By: ${referredBy || 'Direct'}`);
+        // Notify the USER BOT
+        sendTelegram(
+            `<b>🆕 NEW USER REGISTERED</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref By: ${referredBy || 'Direct'}`, 
+            'user' 
+        );
+
         res.status(201).json({ message: "Created", user: newUser });
         
     } catch (err) { 
-        console.error(err);
         res.status(400).json({ error: "Phone exists or data invalid" }); 
     }
 });
 
-// --- REST OF THE ROUTES (Profile, Login, M-Pesa) ---
-
+// --- AUTH & PROFILE ---
 app.post('/api/login', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.body.phone, password: req.body.password });
@@ -156,8 +157,7 @@ app.post('/api/users/update', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Update failed" }); }
 });
 
-// --- MPESA WITH REFERRAL COMMISSION LOGIC ---
-
+// --- WEBHOOK WITH MAIN BOT NOTIFICATION ---
 app.post('/webhook', async (req, res) => {
     res.status(200).send("OK");
     const data = req.body;
@@ -180,34 +180,28 @@ app.post('/webhook', async (req, res) => {
             });
             await user.save();
 
-            // --- PAY REFERRAL COMMISSIONS (10%, 4%, 1%) ---
-            // Level 1
+            // Pay Commissions (L1: 10%, L2: 4%, L3: 1%)
             if (user.referredBy) {
                 const l1 = await User.findOne({ phone: user.referredBy });
                 if (l1) {
                     const comm = amount * 0.10;
-                    l1.balance += comm;
-                    l1.referralBonus += comm;
+                    l1.balance += comm; l1.referralBonus += comm;
                     l1.transactions.push({ id: "COMM"+receipt, type: "L1 Commission", amount: comm, status: "Completed", date: new Date().toLocaleString() });
                     await l1.save();
 
-                    // Level 2
                     if (l1.referredBy) {
                         const l2 = await User.findOne({ phone: l1.referredBy });
                         if (l2) {
                             const comm2 = amount * 0.04;
-                            l2.balance += comm2;
-                            l2.referralBonus += comm2;
+                            l2.balance += comm2; l2.referralBonus += comm2;
                             l2.transactions.push({ id: "COMM2"+receipt, type: "L2 Commission", amount: comm2, status: "Completed", date: new Date().toLocaleString() });
                             await l2.save();
 
-                            // Level 3
                             if (l2.referredBy) {
                                 const l3 = await User.findOne({ phone: l2.referredBy });
                                 if (l3) {
                                     const comm3 = amount * 0.01;
-                                    l3.balance += comm3;
-                                    l3.referralBonus += comm3;
+                                    l3.balance += comm3; l3.referralBonus += comm3;
                                     l3.transactions.push({ id: "COMM3"+receipt, type: "L3 Commission", amount: comm3, status: "Completed", date: new Date().toLocaleString() });
                                     await l3.save();
                                 }
@@ -217,7 +211,8 @@ app.post('/webhook', async (req, res) => {
                 }
             }
             
-            sendTelegram(`<b>✅ DEPOSIT SUCCESS</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n📄 ${receipt}`);
+            // Notify the MAIN BOT
+            sendTelegram(`<b>✅ DEPOSIT SUCCESS</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n📄 ${receipt}`, 'main');
         }
     } catch (err) { console.error("Webhook Error", err); }
 });
@@ -255,7 +250,8 @@ app.post('/api/withdraw', async (req, res) => {
         user.transactions.push({ id: txId, type: "Withdrawal", amount: withdrawAmount, status: "Pending", date: new Date().toLocaleString() });
         await user.save();
         
-        sendTelegram(`🚀 <b>WITHDRAWAL REQUEST</b>\n👤 ${user.fullName}\n📞 ${phone}\n💰 KES ${withdrawAmount}`);
+        // Notify the MAIN BOT
+        sendTelegram(`🚀 <b>WITHDRAWAL REQUEST</b>\n👤 ${user.fullName}\n📞 ${phone}\n💰 KES ${withdrawAmount}`, 'main');
         res.json({ message: "Processing..." });
     } catch (error) { res.status(500).send(); }
 });
