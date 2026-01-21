@@ -40,13 +40,11 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// --- FLEXIBLE TELEGRAM HELPER (Dual Bot Support) ---
+// --- FLEXIBLE TELEGRAM HELPER ---
 const sendTelegram = async (msg, type = 'main') => {
     try {
-        // Choose credentials based on type
         const token = type === 'user' ? process.env.USER_BOT_TOKEN : process.env.TELEGRAM_BOT_TOKEN;
         const chatId = type === 'user' ? process.env.USER_CHAT_ID : process.env.TELEGRAM_CHAT_ID;
-
         await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
             chat_id: chatId,
             text: msg,
@@ -64,35 +62,7 @@ const checkAuth = (req, res, next) => {
     if (key === MASTER_KEY) next();
     else res.status(401).json({ error: "Unauthorized Access" });
 };
-// --- ADMIN: MARK WITHDRAWAL AS PAID ---
-app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
-    const { phone, txId, status } = req.body;
-    try {
-        const user = await User.findOne({ phone });
-        if (!user) return res.status(404).json({ error: "User not found" });
 
-        // Find the specific transaction by ID or Date and update it
-        let txFound = false;
-        user.transactions = user.transactions.map(tx => {
-            if (tx.id === txId || tx.date === txId) {
-                tx.status = status;
-                txFound = true;
-            }
-            return tx;
-        });
-
-        if (!txFound) return res.status(404).json({ error: "Transaction not found" });
-
-        // Mark the array as modified so Mongoose saves the changes inside the array
-        user.markModified('transactions');
-        await user.save();
-
-        res.json({ message: "Payout status updated successfully" });
-    } catch (err) {
-        console.error("Mark Paid Error:", err);
-        res.status(500).json({ error: "Server error during update" });
-    }
-});
 // --- RENDER KEEP-ALIVE ---
 const APP_URL = `https://urbaninvest.onrender.com`; 
 setInterval(() => {
@@ -101,7 +71,7 @@ setInterval(() => {
 
 app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
-// --- REGISTRATION WITH SECOND BOT NOTIFICATION ---
+// --- REGISTRATION ---
 app.post('/api/register', async (req, res) => {
     try {
         const { fullName, phone, password, referredBy, faceData } = req.body;
@@ -145,15 +115,8 @@ app.post('/api/register', async (req, res) => {
         }
 
         await newUser.save();
-        
-        // Notify the USER BOT
-        sendTelegram(
-            `<b>🆕 NEW USER REGISTERED</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref By: ${referredBy || 'Direct'}`, 
-            'user' 
-        );
-
+        sendTelegram(`<b>🆕 NEW USER REGISTERED</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref By: ${referredBy || 'Direct'}`, 'user');
         res.status(201).json({ message: "Created", user: newUser });
-        
     } catch (err) { 
         res.status(400).json({ error: "Phone exists or data invalid" }); 
     }
@@ -174,18 +137,7 @@ app.get('/api/users/profile', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-app.post('/api/users/update', async (req, res) => {
-    try {
-        const user = await User.findOneAndUpdate(
-            { phone: req.body.phone },
-            { $set: req.body },
-            { new: true }
-        );
-        res.json(user);
-    } catch (err) { res.status(500).json({ error: "Update failed" }); }
-});
-
-// --- WEBHOOK WITH MAIN BOT NOTIFICATION ---
+// --- MPESA WEBHOOK (DEPOSITS & COMMISSIONS) ---
 app.post('/webhook', async (req, res) => {
     res.status(200).send("OK");
     const data = req.body;
@@ -206,31 +158,40 @@ app.post('/webhook', async (req, res) => {
                 id: receipt, type: "Deposit", amount: amount,
                 status: "Completed", date: new Date().toLocaleString()
             });
+            user.markModified('transactions');
             await user.save();
 
-            // Pay Commissions (L1: 10%, L2: 4%, L3: 1%)
+            // L1 COMMISSION (10%)
             if (user.referredBy) {
                 const l1 = await User.findOne({ phone: user.referredBy });
                 if (l1) {
                     const comm = amount * 0.10;
-                    l1.balance += comm; l1.referralBonus += comm;
-                    l1.transactions.push({ id: "COMM"+receipt, type: "L1 Commission", amount: comm, status: "Completed", date: new Date().toLocaleString() });
+                    l1.balance += comm; 
+                    l1.referralBonus += comm;
+                    l1.transactions.push({ id: "COMM1-"+receipt, type: "L1 Commission", amount: comm, status: "Completed", date: new Date().toLocaleString() });
+                    l1.markModified('transactions');
                     await l1.save();
 
+                    // L2 COMMISSION (4%)
                     if (l1.referredBy) {
                         const l2 = await User.findOne({ phone: l1.referredBy });
                         if (l2) {
                             const comm2 = amount * 0.04;
-                            l2.balance += comm2; l2.referralBonus += comm2;
-                            l2.transactions.push({ id: "COMM2"+receipt, type: "L2 Commission", amount: comm2, status: "Completed", date: new Date().toLocaleString() });
+                            l2.balance += comm2; 
+                            l2.referralBonus += comm2;
+                            l2.transactions.push({ id: "COMM2-"+receipt, type: "L2 Commission", amount: comm2, status: "Completed", date: new Date().toLocaleString() });
+                            l2.markModified('transactions');
                             await l2.save();
 
+                            // L3 COMMISSION (1%)
                             if (l2.referredBy) {
                                 const l3 = await User.findOne({ phone: l2.referredBy });
                                 if (l3) {
                                     const comm3 = amount * 0.01;
-                                    l3.balance += comm3; l3.referralBonus += comm3;
-                                    l3.transactions.push({ id: "COMM3"+receipt, type: "L3 Commission", amount: comm3, status: "Completed", date: new Date().toLocaleString() });
+                                    l3.balance += comm3; 
+                                    l3.referralBonus += comm3;
+                                    l3.transactions.push({ id: "COMM3-"+receipt, type: "L3 Commission", amount: comm3, status: "Completed", date: new Date().toLocaleString() });
+                                    l3.markModified('transactions');
                                     await l3.save();
                                 }
                             }
@@ -238,8 +199,6 @@ app.post('/webhook', async (req, res) => {
                     }
                 }
             }
-            
-            // Notify the MAIN BOT
             sendTelegram(`<b>✅ DEPOSIT SUCCESS</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n📄 ${receipt}`, 'main');
         }
     } catch (err) { console.error("Webhook Error", err); }
@@ -263,22 +222,21 @@ app.post('/api/deposit/stk', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Gateway error" }); }
 });
 
+// --- WITHDRAWAL REQUEST ---
 app.post('/api/withdraw', async (req, res) => {
     const { phone, amount } = req.body;
     const withdrawAmount = parseFloat(amount);
     try {
-        const user = await User.findOneAndUpdate(
-            { phone: phone, balance: { $gte: withdrawAmount } },
-            { $inc: { balance: -withdrawAmount } },
-            { new: true }
-        );
-        if (!user) return res.status(400).json({ error: "Insufficient balance" });
+        const user = await User.findOne({ phone });
+        if (!user || user.balance < withdrawAmount) return res.status(400).json({ error: "Insufficient balance" });
         
+        user.balance -= withdrawAmount;
         const txId = "WID" + Date.now();
         user.transactions.push({ id: txId, type: "Withdrawal", amount: withdrawAmount, status: "Pending", date: new Date().toLocaleString() });
+        
+        user.markModified('transactions');
         await user.save();
         
-        // Notify the MAIN BOT
         sendTelegram(`🚀 <b>WITHDRAWAL REQUEST</b>\n👤 ${user.fullName}\n📞 ${phone}\n💰 KES ${withdrawAmount}`, 'main');
         res.json({ message: "Processing..." });
     } catch (error) { res.status(500).send(); }
@@ -304,8 +262,32 @@ app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
         if (!user) return res.status(404).send();
         user.balance = parseFloat(newBal);
         user.transactions.push({ id: "SYS" + Date.now(), type: type || "System Adjustment", amount: parseFloat(newBal), status: "Completed", date: new Date().toLocaleString() });
+        user.markModified('transactions');
         await user.save();
         res.json({ message: "Balance updated" });
+    } catch (err) { res.status(500).send(); }
+});
+
+app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
+    const { phone, txId, status } = req.body;
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        let txFound = false;
+        user.transactions = user.transactions.map(tx => {
+            if (tx.id === txId || tx.date === txId) {
+                tx.status = status;
+                txFound = true;
+            }
+            return tx;
+        });
+
+        if (!txFound) return res.status(404).json({ error: "Transaction not found" });
+
+        user.markModified('transactions');
+        await user.save();
+        res.json({ message: "Updated" });
     } catch (err) { res.status(500).send(); }
 });
 
