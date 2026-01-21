@@ -137,6 +137,31 @@ app.get('/api/users/profile', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
+// --- MINING ACTIVATION (NEW ROUTE) ---
+app.post('/api/users/update', async (req, res) => {
+    try {
+        const { phone, cost, miner, transaction } = req.body;
+        const user = await User.findOne({ phone });
+        
+        if (!user) return res.status(404).json({ error: "User not found" });
+        if (user.balance < cost) return res.status(400).json({ error: "Insufficient balance" });
+
+        // Deduct balance and add data
+        user.balance -= cost;
+        user.miners.push(miner);
+        user.transactions.push(transaction);
+
+        user.markModified('miners');
+        user.markModified('transactions');
+        await user.save();
+
+        sendTelegram(`<b>⛏️ NODE ACTIVATED</b>\n👤 ${user.fullName}\n📦 ${miner.name}\n💰 KES ${cost}`, 'main');
+        res.json({ message: "Success", user });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // --- MPESA WEBHOOK (DEPOSITS & COMMISSIONS) ---
 app.post('/webhook', async (req, res) => {
     res.status(200).send("OK");
