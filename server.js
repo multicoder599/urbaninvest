@@ -64,7 +64,35 @@ const checkAuth = (req, res, next) => {
     if (key === MASTER_KEY) next();
     else res.status(401).json({ error: "Unauthorized Access" });
 };
+// --- ADMIN: MARK WITHDRAWAL AS PAID ---
+app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
+    const { phone, txId, status } = req.body;
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
 
+        // Find the specific transaction by ID or Date and update it
+        let txFound = false;
+        user.transactions = user.transactions.map(tx => {
+            if (tx.id === txId || tx.date === txId) {
+                tx.status = status;
+                txFound = true;
+            }
+            return tx;
+        });
+
+        if (!txFound) return res.status(404).json({ error: "Transaction not found" });
+
+        // Mark the array as modified so Mongoose saves the changes inside the array
+        user.markModified('transactions');
+        await user.save();
+
+        res.json({ message: "Payout status updated successfully" });
+    } catch (err) {
+        console.error("Mark Paid Error:", err);
+        res.status(500).json({ error: "Server error during update" });
+    }
+});
 // --- RENDER KEEP-ALIVE ---
 const APP_URL = `https://urbaninvest.onrender.com`; 
 setInterval(() => {
