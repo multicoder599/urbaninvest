@@ -137,25 +137,35 @@ app.get('/api/users/profile', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// --- MINING ACTIVATION (NEW ROUTE) ---
+// --- UPDATED UNIVERSAL UPDATE ROUTE ---
+// This handles ACTIVATION (pushing) and LIQUIDATION (overwriting)
 app.post('/api/users/update', async (req, res) => {
     try {
-        const { phone, cost, miner, transaction } = req.body;
+        const { phone, balance, miners, transactions, cost, miner, transaction } = req.body;
         const user = await User.findOne({ phone });
         
         if (!user) return res.status(404).json({ error: "User not found" });
-        if (user.balance < cost) return res.status(400).json({ error: "Insufficient balance" });
 
-        // Deduct balance and add data
-        user.balance -= cost;
-        user.miners.push(miner);
-        user.transactions.push(transaction);
+        // ACTION 1: ACTIVATION (If 'cost' and 'miner' are provided)
+        if (cost !== undefined && miner) {
+            if (user.balance < cost) return res.status(400).json({ error: "Insufficient balance" });
+            user.balance -= cost;
+            user.miners.push(miner);
+            if (transaction) user.transactions.push(transaction);
+            sendTelegram(`<b>⛏️ NODE ACTIVATED</b>\n👤 ${user.fullName}\n📦 ${miner.name}\n💰 KES ${cost}`, 'main');
+        } 
+        
+        // ACTION 2: SYNC / LIQUIDATION (If full arrays are provided)
+        else {
+            if (balance !== undefined) user.balance = balance;
+            if (miners !== undefined) user.miners = miners; // Overwrites the list (removes cancelled ones)
+            if (transactions !== undefined) user.transactions = transactions;
+        }
 
         user.markModified('miners');
         user.markModified('transactions');
         await user.save();
 
-        sendTelegram(`<b>⛏️ NODE ACTIVATED</b>\n👤 ${user.fullName}\n📦 ${miner.name}\n💰 KES ${cost}`, 'main');
         res.json({ message: "Success", user });
     } catch (err) {
         res.status(500).json({ error: err.message });
