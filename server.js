@@ -26,7 +26,7 @@ const userSchema = new mongoose.Schema({
     password: { type: String, required: true },
     withdrawPin: { type: String, default: "" },
     faceData: { type: Array, default: [] },
-    balance: { type: Number, default: 50 }, 
+    balance: { type: Number, default: 0 }, // Updated to 0 for Activation Gate
     miners: { type: Array, default: [] },
     transactions: { type: Array, default: [] },
     referredBy: { type: String, default: null },
@@ -80,12 +80,12 @@ app.post('/api/register', async (req, res) => {
             fullName, phone, password,
             faceData: faceData || [],
             referredBy: referredBy || null,
-            balance: 50, 
+            balance: 0, // Users start at 0 until activated
             transactions: [{
-                id: "WELCOME" + Date.now(),
-                type: "Signup Bonus",
-                amount: 50,
-                status: "Completed",
+                id: "REG" + Date.now(),
+                type: "Account Created",
+                amount: 0,
+                status: "Pending Activation",
                 date: new Date().toLocaleString()
             }]
         });
@@ -115,7 +115,7 @@ app.post('/api/register', async (req, res) => {
         }
 
         await newUser.save();
-        sendTelegram(`<b>🆕 NEW USER REGISTERED</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref By: ${referredBy || 'Direct'}`, 'user');
+        sendTelegram(`<b>🆕 NEW REGISTRATION</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref: ${referredBy || 'Direct'}`, 'user');
         res.status(201).json({ message: "Created", user: newUser });
     } catch (err) { 
         res.status(400).json({ error: "Phone exists or data invalid" }); 
@@ -138,15 +138,13 @@ app.get('/api/users/profile', async (req, res) => {
 });
 
 // --- UPDATED UNIVERSAL UPDATE ROUTE ---
-// This handles ACTIVATION (pushing) and LIQUIDATION (overwriting)
 app.post('/api/users/update', async (req, res) => {
     try {
-        const { phone, balance, miners, transactions, cost, miner, transaction } = req.body;
+        const { phone, balance, miners, transactions, cost, miner, transaction, password, withdrawPin } = req.body;
         const user = await User.findOne({ phone });
         
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        // ACTION 1: ACTIVATION (If 'cost' and 'miner' are provided)
         if (cost !== undefined && miner) {
             if (user.balance < cost) return res.status(400).json({ error: "Insufficient balance" });
             user.balance -= cost;
@@ -154,12 +152,12 @@ app.post('/api/users/update', async (req, res) => {
             if (transaction) user.transactions.push(transaction);
             sendTelegram(`<b>⛏️ NODE ACTIVATED</b>\n👤 ${user.fullName}\n📦 ${miner.name}\n💰 KES ${cost}`, 'main');
         } 
-        
-        // ACTION 2: SYNC / LIQUIDATION (If full arrays are provided)
         else {
             if (balance !== undefined) user.balance = balance;
-            if (miners !== undefined) user.miners = miners; // Overwrites the list (removes cancelled ones)
+            if (miners !== undefined) user.miners = miners;
             if (transactions !== undefined) user.transactions = transactions;
+            if (password !== undefined) user.password = password;
+            if (withdrawPin !== undefined) user.withdrawPin = withdrawPin;
         }
 
         user.markModified('miners');
@@ -188,26 +186,29 @@ app.post('/webhook', async (req, res) => {
 
         const user = await User.findOne({ phone: dbPhone });
         if (user) {
+            const isActivation = user.balance === 0 && amount >= 300;
             user.balance += amount;
             user.transactions.push({
-                id: receipt, type: "Deposit", amount: amount,
-                status: "Completed", date: new Date().toLocaleString()
+                id: receipt, 
+                type: isActivation ? "Activation Fee" : "Deposit", 
+                amount: amount,
+                status: "Completed", 
+                date: new Date().toLocaleString()
             });
             user.markModified('transactions');
             await user.save();
 
-            // L1 COMMISSION (10%)
+            // Commissions
             if (user.referredBy) {
                 const l1 = await User.findOne({ phone: user.referredBy });
                 if (l1) {
                     const comm = amount * 0.10;
                     l1.balance += comm; 
                     l1.referralBonus += comm;
-                    l1.transactions.push({ id: "COMM1-"+receipt, type: "L1 Commission", amount: comm, status: "Completed", date: new Date().toLocaleString() });
+                    l1.transactions.push({ id: "COMM1-"+receipt, type: "Team Commission", amount: comm, status: "Completed", date: new Date().toLocaleString() });
                     l1.markModified('transactions');
                     await l1.save();
 
-                    // L2 COMMISSION (4%)
                     if (l1.referredBy) {
                         const l2 = await User.findOne({ phone: l1.referredBy });
                         if (l2) {
@@ -218,7 +219,6 @@ app.post('/webhook', async (req, res) => {
                             l2.markModified('transactions');
                             await l2.save();
 
-                            // L3 COMMISSION (1%)
                             if (l2.referredBy) {
                                 const l3 = await User.findOne({ phone: l2.referredBy });
                                 if (l3) {
@@ -234,7 +234,7 @@ app.post('/webhook', async (req, res) => {
                     }
                 }
             }
-            sendTelegram(`<b>✅ DEPOSIT SUCCESS</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n📄 ${receipt}`, 'main');
+            sendTelegram(`<b>✅ PAYMENT CONFIRMED</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n${isActivation ? '⭐ ACCOUNT ACTIVATED' : '💳 DEPOSIT'}`, 'main');
         }
     } catch (err) { console.error("Webhook Error", err); }
 });
@@ -248,8 +248,8 @@ app.post('/api/deposit/stk', async (req, res) => {
         msisdn: formattedPhone,
         email: "kanyingiwaitara@gmail.com",
         callback_url: `${APP_URL}/webhook`,
-        description: "UrbanMining Deposit",
-        reference: "UI" + Date.now()
+        description: "UrbanMining Payment",
+        reference: "ACT" + Date.now()
     };
     try {
         await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload);
@@ -257,22 +257,32 @@ app.post('/api/deposit/stk', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Gateway error" }); }
 });
 
-// --- WITHDRAWAL REQUEST ---
+// --- WITHDRAWAL REQUEST (UPDATED) ---
 app.post('/api/withdraw', async (req, res) => {
     const { phone, amount } = req.body;
     const withdrawAmount = parseFloat(amount);
+    const flatFee = 30;
+
     try {
         const user = await User.findOne({ phone });
-        if (!user || user.balance < withdrawAmount) return res.status(400).json({ error: "Insufficient balance" });
+        if (!user || user.balance < 300) return res.status(403).json({ error: "Activate account first" });
+        if (withdrawAmount < 500) return res.status(400).json({ error: "Minimum withdrawal is KES 500" });
+        if (user.balance < withdrawAmount) return res.status(400).json({ error: "Insufficient balance" });
         
         user.balance -= withdrawAmount;
         const txId = "WID" + Date.now();
-        user.transactions.push({ id: txId, type: "Withdrawal", amount: withdrawAmount, status: "Pending", date: new Date().toLocaleString() });
+        user.transactions.push({ 
+            id: txId, 
+            type: "Withdrawal", 
+            amount: withdrawAmount, 
+            status: "Pending", 
+            date: new Date().toLocaleString() 
+        });
         
         user.markModified('transactions');
         await user.save();
         
-        sendTelegram(`🚀 <b>WITHDRAWAL REQUEST</b>\n👤 ${user.fullName}\n📞 ${phone}\n💰 KES ${withdrawAmount}`, 'main');
+        sendTelegram(`🚀 <b>WITHDRAWAL REQUEST</b>\n👤 ${user.fullName}\n📞 ${phone}\n💰 KES ${withdrawAmount}\n💸 Net to Pay: KES ${withdrawAmount - flatFee}`, 'main');
         res.json({ message: "Processing..." });
     } catch (error) { res.status(500).send(); }
 });
