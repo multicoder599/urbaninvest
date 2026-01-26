@@ -264,13 +264,13 @@ app.post('/api/deposit/stk', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Gateway error" }); }
 });
 
-// --- ADMIN: GRANDFATHER OLD USERS ---
-app.get('/api/admin/grandfather-users', checkAuth, async (req, res) => {
-    try {
-        await User.updateMany({}, { $set: { isActivated: true } });
-        res.send("Existing users activated.");
-    } catch (err) { res.status(500).send("Error"); }
-});
+// --- ADMIN: GRANDFATHER OLD USERS (DISABLED AFTER USE) ---
+// app.get('/api/admin/grandfather-users', checkAuth, async (req, res) => {
+//     try {
+//         await User.updateMany({}, { $set: { isActivated: true } });
+//         res.send("Success: All existing users are now activated.");
+//     } catch (err) { res.status(500).send("Error updating users."); }
+// });
 
 // --- ADMIN: OTHER ROUTES ---
 app.get('/api/admin/users', checkAuth, async (req, res) => {
