@@ -27,7 +27,8 @@ const userSchema = new mongoose.Schema({
     withdrawPin: { type: String, default: "" },
     faceData: { type: Array, default: [] },
     balance: { type: Number, default: 0 }, 
-    isActivated: { type: Boolean, default: false }, // New logic
+    lockedBalance: { type: Number, default: 0 }, // NEW: Hidden reserve for referrals/maintenance
+    isActivated: { type: Boolean, default: false },
     miners: { type: Array, default: [] },
     transactions: { type: Array, default: [] },
     referredBy: { type: String, default: null },
@@ -70,16 +71,16 @@ const APP_URL = `https://urbaninvest.onrender.com`;
 setInterval(() => { axios.get(`${APP_URL}/ping`).catch(() => {}); }, 840000); 
 app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
-// --- REGISTRATION (Full Referral Logic) ---
+// --- REGISTRATION ---
 app.post('/api/register', async (req, res) => {
     try {
         const { fullName, phone, password, referredBy, faceData } = req.body;
-
         const newUser = new User({
             fullName, phone, password,
             faceData: faceData || [],
             referredBy: referredBy || null,
             balance: 0,
+            lockedBalance: 0,
             isActivated: false,
             transactions: [{
                 id: "REG" + Date.now(),
@@ -95,13 +96,12 @@ app.post('/api/register', async (req, res) => {
             if (parentL1) {
                 parentL1.team.push({ name: fullName, phone: phone, date: new Date().toLocaleDateString() });
                 await parentL1.save();
-
+                // (Nested L2/L3 logic follows...)
                 if (parentL1.referredBy) {
                     const parentL2 = await User.findOne({ phone: parentL1.referredBy });
                     if (parentL2) {
                         parentL2.teamL2.push({ name: fullName, phone: phone, from: parentL1.fullName });
                         await parentL2.save();
-
                         if (parentL2.referredBy) {
                             const parentL3 = await User.findOne({ phone: parentL2.referredBy });
                             if (parentL3) {
@@ -113,7 +113,6 @@ app.post('/api/register', async (req, res) => {
                 }
             }
         }
-
         await newUser.save();
         sendTelegram(`<b>🆕 NEW REGISTRATION</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref: ${referredBy || 'Direct'}`, 'user');
         res.status(201).json({ message: "Created", user: newUser });
@@ -135,15 +134,18 @@ app.get('/api/users/profile', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// --- UNIVERSAL UPDATE (Liquidation & Security) ---
+// --- UNIVERSAL UPDATE (With Spendable Logic) ---
 app.post('/api/users/update', async (req, res) => {
     try {
-        const { phone, balance, miners, transactions, cost, miner, transaction, password, withdrawPin, isActivated } = req.body;
+        const { phone, balance, miners, transactions, cost, miner, transaction, password, withdrawPin, isActivated, lockedBalance } = req.body;
         const user = await User.findOne({ phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
         if (cost !== undefined && miner) {
-            if (user.balance < cost) return res.status(400).json({ error: "Insufficient balance" });
+            // SPENDABLE CHECK: Cannot spend the locked activation reserve
+            const spendable = user.balance - (user.lockedBalance || 0);
+            if (spendable < cost) return res.status(400).json({ error: "Insufficient spendable balance. KES 200 must remain locked." });
+            
             user.balance -= cost;
             user.miners.push(miner);
             if (transaction) user.transactions.push(transaction);
@@ -155,6 +157,7 @@ app.post('/api/users/update', async (req, res) => {
             if (password !== undefined) user.password = password;
             if (withdrawPin !== undefined) user.withdrawPin = withdrawPin;
             if (isActivated !== undefined) user.isActivated = isActivated;
+            if (lockedBalance !== undefined) user.lockedBalance = lockedBalance;
         }
 
         user.markModified('miners');
@@ -164,7 +167,7 @@ app.post('/api/users/update', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- WEBHOOK (Deposits & 3-Level Commissions) ---
+// --- WEBHOOK (Deposits & Locked Balance Logic) ---
 app.post('/webhook', async (req, res) => {
     res.status(200).send("OK");
     const data = req.body;
@@ -173,24 +176,27 @@ app.post('/webhook', async (req, res) => {
         if (!success) return;
         const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
         const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
-        let rawPhone = data.Msisdn || data.phone || data.PhoneNumber;
-        let dbPhone = rawPhone.toString();
+        let dbPhone = (data.Msisdn || data.phone || data.PhoneNumber).toString();
         if (dbPhone.startsWith('254')) dbPhone = '0' + dbPhone.substring(3);
 
         const user = await User.findOne({ phone: dbPhone });
         if (user) {
             const activating = (amount >= 300 && !user.isActivated);
-            if (activating) user.isActivated = true;
+            if (activating) {
+                user.isActivated = true;
+                user.lockedBalance = 200; // Psychological Lock
+            }
 
             user.balance += amount;
             user.transactions.push({
-                id: receipt, type: activating ? "Activation Fee" : "Deposit", amount: amount,
-                status: "Completed", date: new Date().toLocaleString()
+                id: receipt, 
+                type: activating ? "Account Activation" : "Deposit", 
+                amount: amount,
+                status: "Completed", 
+                date: new Date().toLocaleString()
             });
-            user.markModified('transactions');
-            await user.save();
 
-            // 3-LEVEL COMMISSIONS
+            // 3-LEVEL COMMISSIONS (Calculated on Full 300)
             if (user.referredBy) {
                 const l1 = await User.findOne({ phone: user.referredBy });
                 if (l1) {
@@ -198,7 +204,7 @@ app.post('/webhook', async (req, res) => {
                     l1.balance += c1; l1.referralBonus += c1;
                     l1.transactions.push({ id: "C1-"+receipt, type: "Team Commission", amount: c1, status: "Completed", date: new Date().toLocaleString() });
                     await l1.save();
-
+                    // (L2 and L3 nested logic continues...)
                     if (l1.referredBy) {
                         const l2 = await User.findOne({ phone: l1.referredBy });
                         if (l2) {
@@ -206,7 +212,6 @@ app.post('/webhook', async (req, res) => {
                             l2.balance += c2; l2.referralBonus += c2;
                             l2.transactions.push({ id: "C2-"+receipt, type: "L2 Commission", amount: c2, status: "Completed", date: new Date().toLocaleString() });
                             await l2.save();
-
                             if (l2.referredBy) {
                                 const l3 = await User.findOne({ phone: l2.referredBy });
                                 if (l3) {
@@ -220,12 +225,14 @@ app.post('/webhook', async (req, res) => {
                     }
                 }
             }
+            user.markModified('transactions');
+            await user.save();
             sendTelegram(`<b>✅ PAYMENT</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n${activating ? '⭐ ACTIVATED' : '💳 DEPOSIT'}`, 'main');
         }
     } catch (err) { console.error("Webhook Error", err); }
 });
 
-// --- WITHDRAWAL (Min 500 / Flat 30 Fee) ---
+// --- WITHDRAWAL (Locked Safety Check) ---
 app.post('/api/withdraw', async (req, res) => {
     const { phone, amount } = req.body;
     const withdrawAmount = parseFloat(amount);
@@ -234,8 +241,10 @@ app.post('/api/withdraw', async (req, res) => {
     try {
         const user = await User.findOne({ phone });
         if (!user || !user.isActivated) return res.status(403).json({ error: "Activate account first" });
+        
+        const spendable = user.balance - (user.lockedBalance || 0);
         if (withdrawAmount < 500) return res.status(400).json({ error: "Min withdrawal KES 500" });
-        if (user.balance < withdrawAmount) return res.status(400).json({ error: "Insufficient balance" });
+        if (spendable < withdrawAmount) return res.status(400).json({ error: "Cannot withdraw locked activation reserve (KES 200)" });
         
         user.balance -= withdrawAmount;
         const txId = "WID" + Date.now();
@@ -249,7 +258,7 @@ app.post('/api/withdraw', async (req, res) => {
     } catch (error) { res.status(500).send(); }
 });
 
-// --- STK PUSH ---
+// --- STK PUSH & ADMIN ROUTES ---
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
     let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
@@ -264,23 +273,12 @@ app.post('/api/deposit/stk', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Gateway error" }); }
 });
 
-// --- ADMIN: GRANDFATHER OLD USERS (DISABLED AFTER USE) ---
-// app.get('/api/admin/grandfather-users', checkAuth, async (req, res) => {
-//     try {
-//         await User.updateMany({}, { $set: { isActivated: true } });
-//         res.send("Success: All existing users are now activated.");
-//     } catch (err) { res.status(500).send("Error updating users."); }
-// });
-
 app.post('/api/admin/verify', (req, res) => {
     const { key } = req.body;
-    if (key === MASTER_KEY) {
-        res.status(200).json({ message: "Authorized" });
-    } else {
-        res.status(401).json({ error: "Invalid Key" });
-    }
+    if (key === MASTER_KEY) res.status(200).json({ message: "Authorized" });
+    else res.status(401).json({ error: "Invalid Key" });
 });
-// --- ADMIN: OTHER ROUTES ---
+
 app.get('/api/admin/users', checkAuth, async (req, res) => {
     try {
         const users = await User.find({}).sort({ createdAt: -1 });
