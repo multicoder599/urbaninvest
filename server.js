@@ -272,6 +272,14 @@ app.post('/api/deposit/stk', async (req, res) => {
 //     } catch (err) { res.status(500).send("Error updating users."); }
 // });
 
+app.post('/api/admin/verify', (req, res) => {
+    const { key } = req.body;
+    if (key === MASTER_KEY) {
+        res.status(200).json({ message: "Authorized" });
+    } else {
+        res.status(401).json({ error: "Invalid Key" });
+    }
+});
 // --- ADMIN: OTHER ROUTES ---
 app.get('/api/admin/users', checkAuth, async (req, res) => {
     try {
