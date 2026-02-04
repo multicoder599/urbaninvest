@@ -19,7 +19,7 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 3. DATA STRUCTURE
+// 3. DATA STRUCTURE (Updated with Notifications array)
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
     phone: { type: String, unique: true, required: true, index: true },
@@ -27,10 +27,11 @@ const userSchema = new mongoose.Schema({
     withdrawPin: { type: String, default: "" },
     faceData: { type: Array, default: [] },
     balance: { type: Number, default: 0 }, 
-    lockedBalance: { type: Number, default: 0 }, // NEW: Hidden reserve for referrals/maintenance
+    lockedBalance: { type: Number, default: 0 }, 
     isActivated: { type: Boolean, default: false },
     miners: { type: Array, default: [] },
     transactions: { type: Array, default: [] },
+    notifications: { type: Array, default: [] }, // NEW: Stores user alerts
     referredBy: { type: String, default: null },
     team: { type: Array, default: [] },    
     teamL2: { type: Array, default: [] },  
@@ -82,6 +83,13 @@ app.post('/api/register', async (req, res) => {
             balance: 0,
             lockedBalance: 0,
             isActivated: false,
+            notifications: [{
+                id: "WELCOME" + Date.now(),
+                title: "Welcome to UrbanMining",
+                msg: "Start your journey by activating your account with KES 300.",
+                time: new Date().toLocaleDateString(),
+                isRead: false
+            }],
             transactions: [{
                 id: "REG" + Date.now(),
                 type: "Account Created",
@@ -96,7 +104,6 @@ app.post('/api/register', async (req, res) => {
             if (parentL1) {
                 parentL1.team.push({ name: fullName, phone: phone, date: new Date().toLocaleDateString() });
                 await parentL1.save();
-                // (Nested L2/L3 logic follows...)
                 if (parentL1.referredBy) {
                     const parentL2 = await User.findOne({ phone: parentL1.referredBy });
                     if (parentL2) {
@@ -134,6 +141,43 @@ app.get('/api/users/profile', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
+// --- NOTIFICATION RETRIEVAL ---
+app.get('/api/users/notifications', async (req, res) => {
+    try {
+        const user = await User.findOne({ phone: req.query.phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+        res.json(user.notifications.reverse()); // Newest first
+    } catch (err) { res.status(500).send(); }
+});
+
+app.post('/api/users/notifications/read', async (req, res) => {
+    try {
+        const { phone, notiId } = req.body;
+        const user = await User.findOne({ phone });
+        user.notifications = user.notifications.map(n => {
+            if (n.id === notiId) n.isRead = true;
+            return n;
+        });
+        user.markModified('notifications');
+        await user.save();
+        res.json({ message: "Read" });
+    } catch (err) { res.status(500).send(); }
+});
+
+app.post('/api/users/notifications/read-all', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        const user = await User.findOne({ phone });
+        user.notifications = user.notifications.map(n => {
+            n.isRead = true;
+            return n;
+        });
+        user.markModified('notifications');
+        await user.save();
+        res.json({ message: "All Read" });
+    } catch (err) { res.status(500).send(); }
+});
+
 // --- UNIVERSAL UPDATE (With Spendable Logic) ---
 app.post('/api/users/update', async (req, res) => {
     try {
@@ -142,7 +186,6 @@ app.post('/api/users/update', async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found" });
 
         if (cost !== undefined && miner) {
-            // SPENDABLE CHECK: Cannot spend the locked activation reserve
             const spendable = user.balance - (user.lockedBalance || 0);
             if (spendable < cost) return res.status(400).json({ error: "Insufficient spendable balance. KES 200 must remain locked." });
             
@@ -184,7 +227,7 @@ app.post('/webhook', async (req, res) => {
             const activating = (amount >= 300 && !user.isActivated);
             if (activating) {
                 user.isActivated = true;
-                user.lockedBalance = 200; // Psychological Lock
+                user.lockedBalance = 200; 
             }
 
             user.balance += amount;
@@ -196,7 +239,6 @@ app.post('/webhook', async (req, res) => {
                 date: new Date().toLocaleString()
             });
 
-            // 3-LEVEL COMMISSIONS (Calculated on Full 300)
             if (user.referredBy) {
                 const l1 = await User.findOne({ phone: user.referredBy });
                 if (l1) {
@@ -204,7 +246,6 @@ app.post('/webhook', async (req, res) => {
                     l1.balance += c1; l1.referralBonus += c1;
                     l1.transactions.push({ id: "C1-"+receipt, type: "Team Commission", amount: c1, status: "Completed", date: new Date().toLocaleString() });
                     await l1.save();
-                    // (L2 and L3 nested logic continues...)
                     if (l1.referredBy) {
                         const l2 = await User.findOne({ phone: l1.referredBy });
                         if (l2) {
@@ -258,7 +299,7 @@ app.post('/api/withdraw', async (req, res) => {
     } catch (error) { res.status(500).send(); }
 });
 
-// --- STK PUSH & ADMIN ROUTES ---
+// --- STK PUSH ---
 app.post('/api/deposit/stk', async (req, res) => {
     let { phone, amount } = req.body;
     let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
@@ -273,6 +314,7 @@ app.post('/api/deposit/stk', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Gateway error" }); }
 });
 
+// --- ADMIN ROUTES ---
 app.post('/api/admin/verify', (req, res) => {
     const { key } = req.body;
     if (key === MASTER_KEY) res.status(200).json({ message: "Authorized" });
@@ -284,6 +326,31 @@ app.get('/api/admin/users', checkAuth, async (req, res) => {
         const users = await User.find({}).sort({ createdAt: -1 });
         res.json(users);
     } catch (err) { res.status(500).json({ error: "Denied" }); }
+});
+
+// ADMIN: Individual Notification
+app.post('/api/admin/send-notification', checkAuth, async (req, res) => {
+    try {
+        const { phone, title, msg, time, id } = req.body;
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        user.notifications.push({ id, title, msg, time, isRead: false });
+        user.markModified('notifications');
+        await user.save();
+        res.json({ message: "Sent" });
+    } catch (err) { res.status(500).send(); }
+});
+
+// ADMIN: Global Broadcast
+app.post('/api/admin/broadcast-notification', checkAuth, async (req, res) => {
+    try {
+        const { title, msg, time, id } = req.body;
+        await User.updateMany({}, {
+            $push: { notifications: { id, title, msg, time, isRead: false } }
+        });
+        res.json({ message: "Broadcast Complete" });
+    } catch (err) { res.status(500).send(); }
 });
 
 app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
@@ -306,7 +373,20 @@ app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
             if (tx.id === txId || tx.date === txId) tx.status = status;
             return tx;
         });
+        
+        // Auto-notify user that payment is completed
+        if(status === "Completed") {
+            user.notifications.push({
+                id: "PAY" + Date.now(),
+                title: "Withdrawal Successful",
+                msg: `Your withdrawal request has been processed successfully.`,
+                time: new Date().toLocaleTimeString(),
+                isRead: false
+            });
+        }
+
         user.markModified('transactions');
+        user.markModified('notifications');
         await user.save();
         res.json({ message: "Done" });
     } catch (err) { res.status(500).send(); }
