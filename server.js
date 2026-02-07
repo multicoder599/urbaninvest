@@ -108,15 +108,20 @@ app.post('/api/register', async (req, res) => {
         });
 
         if (referredBy) {
+            // 1. Level 1 Update
             const parentL1 = await User.findOne({ phone: referredBy });
             if (parentL1) {
                 parentL1.team.push({ name: fullName, phone: phone, date: new Date().toLocaleDateString() });
                 await parentL1.save();
+        
+                // 2. Level 2 Update
                 if (parentL1.referredBy) {
                     const parentL2 = await User.findOne({ phone: parentL1.referredBy });
                     if (parentL2) {
                         parentL2.teamL2.push({ name: fullName, phone: phone, from: parentL1.fullName });
                         await parentL2.save();
+        
+                        // 3. Level 3 Update
                         if (parentL2.referredBy) {
                             const parentL3 = await User.findOne({ phone: parentL2.referredBy });
                             if (parentL3) {
