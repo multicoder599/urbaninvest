@@ -6,6 +6,11 @@ const axios = require('axios');
 
 const app = express();
 
+// --- CONFIGURATION ---
+const PORT = process.env.PORT || 5000;
+const APP_URL = "https://urbaninvest.onrender.com"; // Ensure this matches your Render URL exactly (no trailing slash)
+const ADMIN_KEY = process.env.ADMIN_KEY || "901363";
+
 // 1. MIDDLEWARE
 app.use(cors({ 
     origin: '*', 
@@ -19,7 +24,15 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 3. DATA STRUCTURE
+// 3. HELPER: KENYAN TIME
+// This fixes the date issue (e.g., 06/02 appearing as June 2nd)
+const getKenyanTime = () => new Date().toLocaleString("en-GB", { 
+    timeZone: "Africa/Nairobi",
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true
+});
+
+// 4. DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
     phone: { type: String, unique: true, required: true, index: true },
@@ -29,22 +42,24 @@ const userSchema = new mongoose.Schema({
     balance: { type: Number, default: 0 }, 
     lockedBalance: { type: Number, default: 0 }, 
 
-    // --- INSERTION POINT: CRYPTO & PORTFOLIO FIELDS ---
+    // Crypto & Assets
     usdt_bal: { type: Number, default: 0 },
     btc_bal: { type: Number, default: 0 },
     eth_bal: { type: Number, default: 0 },
     activeInvestments: { type: Array, default: [] }, 
-    // --------------------------------------------------
 
     isActivated: { type: Boolean, default: false },
     miners: { type: Array, default: [] },
-    transactions: { type: Array, default: [] },
+    transactions: { type: Array, default: [] }, // Stores history
     notifications: { type: Array, default: [] }, 
     referredBy: { type: String, default: null },
+    
+    // Teams
     team: { type: Array, default: [] },    
     teamL2: { type: Array, default: [] },  
     teamL3: { type: Array, default: [] },  
     referralBonus: { type: Number, default: 0 },
+    
     lastSpinDate: { type: Date, default: null },
     freeSpinsUsed: { type: Number, default: 0 },
     paidSpinsAvailable: { type: Number, default: 0 }
@@ -57,28 +72,32 @@ const sendTelegram = async (msg, type = 'main') => {
     try {
         const token = type === 'user' ? process.env.USER_BOT_TOKEN : process.env.TELEGRAM_BOT_TOKEN;
         const chatId = type === 'user' ? process.env.USER_CHAT_ID : process.env.TELEGRAM_CHAT_ID;
-        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
-            chat_id: chatId,
-            text: msg,
-            parse_mode: 'HTML'
-        });
+        // Only send if tokens are present to prevent crashes
+        if(token && chatId) {
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+                chat_id: chatId, text: msg, parse_mode: 'HTML'
+            });
+        }
     } catch (e) { 
-        console.error(`Telegram Error (${type}):`, e.response?.data || e.message); 
+        console.error(`Telegram Error (${type}):`, e.message); 
     }
 };
 
-// --- ADMIN SECURITY ---
-const MASTER_KEY = process.env.ADMIN_KEY || "901363"; 
+// --- AUTH MIDDLEWARE ---
 const checkAuth = (req, res, next) => {
     const key = req.headers['authorization'];
-    if (key === MASTER_KEY) next();
+    if (key === ADMIN_KEY) next();
     else res.status(401).json({ error: "Unauthorized Access" });
 };
 
 // --- KEEP-ALIVE ---
-const APP_URL = `https://urbaninvest.onrender.com`; 
 setInterval(() => { axios.get(`${APP_URL}/ping`).catch(() => {}); }, 840000); 
 app.get('/ping', (req, res) => res.status(200).send("Awake"));
+
+
+// ============================================================
+//                    CORE API ROUTES
+// ============================================================
 
 // --- REGISTRATION ---
 app.post('/api/register', async (req, res) => {
@@ -88,14 +107,13 @@ app.post('/api/register', async (req, res) => {
             fullName, phone, password,
             faceData: faceData || [],
             referredBy: referredBy || null,
-            balance: 0,
-            lockedBalance: 0,
+            balance: 0, lockedBalance: 0,
             isActivated: false,
             notifications: [{
                 id: "WELCOME" + Date.now(),
                 title: "Welcome to UrbanMining",
                 msg: "Start your journey by activating your account with KES 300.",
-                time: new Date().toLocaleDateString(),
+                time: getKenyanTime(),
                 isRead: false
             }],
             transactions: [{
@@ -103,25 +121,23 @@ app.post('/api/register', async (req, res) => {
                 type: "Account Created",
                 amount: 0,
                 status: "Pending Activation",
-                date: new Date().toLocaleString()
+                date: getKenyanTime()
             }]
         });
 
+        // Handle Referral Tree
         if (referredBy) {
-            // 1. Level 1 Update
             const parentL1 = await User.findOne({ phone: referredBy });
             if (parentL1) {
-                parentL1.team.push({ name: fullName, phone: phone, date: new Date().toLocaleDateString() });
+                parentL1.team.push({ name: fullName, phone: phone, date: getKenyanTime() });
                 await parentL1.save();
         
-                // 2. Level 2 Update
                 if (parentL1.referredBy) {
                     const parentL2 = await User.findOne({ phone: parentL1.referredBy });
                     if (parentL2) {
                         parentL2.teamL2.push({ name: fullName, phone: phone, from: parentL1.fullName });
                         await parentL2.save();
         
-                        // 3. Level 3 Update
                         if (parentL2.referredBy) {
                             const parentL3 = await User.findOne({ phone: parentL2.referredBy });
                             if (parentL3) {
@@ -136,26 +152,18 @@ app.post('/api/register', async (req, res) => {
         await newUser.save();
         sendTelegram(`<b>🆕 NEW REGISTRATION</b>\n👤 ${fullName}\n📞 ${phone}\n🔗 Ref: ${referredBy || 'Direct'}`, 'user');
         res.status(201).json({ message: "Created", user: newUser });
-    } catch (err) { res.status(400).json({ error: "Registration failed" }); }
+    } catch (err) { res.status(400).json({ error: "Registration failed or User exists" }); }
 });
 
-// --- AUTH ---
+// --- LOGIN ---
 app.post('/api/login', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.body.phone, password: req.body.password });
-        user ? res.json(user) : res.status(401).json({ error: "Invalid login" });
+        user ? res.json(user) : res.status(401).json({ error: "Invalid login credentials" });
     } catch (err) { res.status(500).send(); }
 });
 
-// --- INSERTION POINT: GET USER BY PHONE ---
-app.get('/api/users/:phone', async (req, res) => {
-    try {
-        const user = await User.findOne({ phone: req.params.phone });
-        user ? res.json(user) : res.status(404).json({ error: "User not found" });
-    } catch (err) { res.status(500).send(); }
-});
-// ------------------------------------------
-
+// --- GET PROFILE ---
 app.get('/api/users/profile', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.query.phone });
@@ -163,44 +171,158 @@ app.get('/api/users/profile', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// --- NOTIFICATION RETRIEVAL ---
-app.get('/api/users/notifications', async (req, res) => {
+// --- STK PUSH (DEPOSIT) ---
+app.post('/api/deposit/stk', async (req, res) => {
+    let { phone, amount } = req.body;
+    
+    // Strict Phone Sanitization (Remove +, spaces, ensure 254)
+    let formattedPhone = phone.replace(/\D/g, ''); 
+    if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
+    if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
+
+    const payload = {
+        api_key: "MGPY26G5iWPw", // REPLACE WITH YOUR REAL KEY
+        email: "kanyingiwaitara@gmail.com", 
+        amount: amount, 
+        msisdn: formattedPhone,
+        callback_url: `${APP_URL}/webhook`, // Points to the /webhook route below
+        description: "UrbanMining Deposit", 
+        reference: "DEP" + Date.now()
+    };
+
     try {
-        const user = await User.findOne({ phone: req.query.phone });
+        await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload);
+        res.status(200).json({ status: "Sent", message: "STK Push Sent" });
+    } catch (error) { 
+        console.error("Gateway Error:", error.response?.data || error.message);
+        res.status(500).json({ error: "Payment Gateway Error. Try Manual Paybill." }); 
+    }
+});
+
+// --- WEBHOOK (INSTANT DEPOSIT) ---
+app.post('/webhook', async (req, res) => {
+    res.status(200).send("OK"); // Ack immediately
+
+    const data = req.body;
+    try {
+        // 1. Check Success Code
+        const responseCode = data.ResponseCode !== undefined ? data.ResponseCode : data.ResultCode;
+        if (responseCode != 0) return;
+
+        // 2. Extract Data
+        const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
+        let phone = (data.Msisdn || data.phone || data.PhoneNumber).toString();
+
+        // 3. Normalize Phone
+        if (phone.startsWith('254')) phone = '0' + phone.substring(3);
+
+        const user = await User.findOne({ phone: phone });
+        if (!user) return;
+
+        // 4. Prevent Duplicates
+        const isDuplicate = user.transactions.some(t => t.id === receipt);
+        if (isDuplicate) return;
+
+        // 5. Activation Logic
+        const isActivation = (amount >= 300 && !user.isActivated);
+        if (isActivation) {
+            user.isActivated = true;
+            user.lockedBalance = (user.lockedBalance || 0) + 200;
+        }
+
+        // 6. Credit & Record (UNSHIFT = Newest First)
+        user.balance += amount;
+        user.transactions.unshift({
+            id: receipt,
+            type: isActivation ? "Account Activation" : "Deposit",
+            amount: amount,
+            status: "Success",
+            date: getKenyanTime()
+        });
+
+        // 7. Save User FIRST
+        await user.save();
+
+        // 8. Notifications
+        sendTelegram(`<b>✅ DEPOSIT CONFIRMED</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n🧾 ${receipt}`, 'main');
+        
+        // 9. Commissions (Background)
+        if (user.referredBy) processCommissions(user.referredBy, amount, receipt, getKenyanTime());
+
+    } catch (err) {
+        console.error("Webhook Error:", err);
+    }
+});
+
+// --- COMMISSION HELPER ---
+async function processCommissions(uplinePhone, amount, receipt, dateStr) {
+    try {
+        // Level 1 (10%)
+        const l1 = await User.findOne({ phone: uplinePhone });
+        if (!l1) return;
+        const c1 = amount * 0.10;
+        l1.balance += c1; l1.referralBonus += c1;
+        l1.transactions.unshift({ id: `C1-${receipt}`, type: "Team Commission (L1)", amount: c1, status: "Success", date: dateStr });
+        await l1.save();
+
+        // Level 2 (4%)
+        if (l1.referredBy) {
+            const l2 = await User.findOne({ phone: l1.referredBy });
+            if (l2) {
+                const c2 = amount * 0.04;
+                l2.balance += c2; l2.referralBonus += c2;
+                l2.transactions.unshift({ id: `C2-${receipt}`, type: "Team Commission (L2)", amount: c2, status: "Success", date: dateStr });
+                await l2.save();
+
+                // Level 3 (1%)
+                if (l2.referredBy) {
+                    const l3 = await User.findOne({ phone: l2.referredBy });
+                    if (l3) {
+                        const c3 = amount * 0.01;
+                        l3.balance += c3; l3.referralBonus += c3;
+                        l3.transactions.unshift({ id: `C3-${receipt}`, type: "Team Commission (L3)", amount: c3, status: "Success", date: dateStr });
+                        await l3.save();
+                    }
+                }
+            }
+        }
+    } catch (err) { console.error("Commission Error:", err); }
+}
+
+// --- WITHDRAWAL ---
+app.post('/api/withdraw', async (req, res) => {
+    const { phone, amount } = req.body;
+    const withdrawAmount = parseFloat(amount);
+    
+    try {
+        const user = await User.findOne({ phone });
         if (!user) return res.status(404).json({ error: "User not found" });
-        res.json(user.notifications.reverse()); 
-    } catch (err) { res.status(500).send(); }
-});
+        if (!user.isActivated) return res.status(403).json({ error: "Account not activated." });
+        if (withdrawAmount < 200) return res.status(400).json({ error: "Minimum withdrawal is KES 200" });
 
-app.post('/api/users/notifications/read', async (req, res) => {
-    try {
-        const { phone, notiId } = req.body;
-        const user = await User.findOne({ phone });
-        user.notifications = user.notifications.map(n => {
-            if (n.id === notiId) n.isRead = true;
-            return n;
+        const spendable = user.balance - (user.lockedBalance || 0);
+        if (spendable < withdrawAmount) return res.status(400).json({ error: "Insufficient spendable balance." });
+
+        user.balance -= withdrawAmount;
+        const txId = "WID" + Date.now();
+        
+        user.transactions.unshift({ 
+            id: txId, 
+            type: "Withdrawal", 
+            amount: -withdrawAmount, 
+            status: "Pending", 
+            date: getKenyanTime() 
         });
-        user.markModified('notifications');
+
         await user.save();
-        res.json({ message: "Read" });
-    } catch (err) { res.status(500).send(); }
+        sendTelegram(`🚀 <b>WITHDRAW REQUEST</b>\n👤 ${user.fullName}\n💰 KES ${withdrawAmount}\n🆔 ${txId}`, 'main');
+        res.json({ message: "Withdrawal processing.", user });
+
+    } catch (error) { res.status(500).json({ error: "Server Error" }); }
 });
 
-app.post('/api/users/notifications/read-all', async (req, res) => {
-    try {
-        const { phone } = req.body;
-        const user = await User.findOne({ phone });
-        user.notifications = user.notifications.map(n => {
-            n.isRead = true;
-            return n;
-        });
-        user.markModified('notifications');
-        await user.save();
-        res.json({ message: "All Read" });
-    } catch (err) { res.status(500).send(); }
-});
-
-// --- INSERTION POINT: INTERNAL P2P TRANSFERS ---
+// --- P2P TRANSFER ---
 app.post('/api/users/transfer', async (req, res) => {
     const { senderPhone, recipientPhone, amount, asset } = req.body;
     try {
@@ -210,20 +332,28 @@ app.post('/api/users/transfer', async (req, res) => {
         if (!sender || !receiver) return res.status(404).json({ message: "Recipient not found" });
         
         let field = asset === 'kes' ? 'balance' : `${asset.toLowerCase()}_bal`;
-        if (sender[field] < amount) return res.status(400).json({ message: "Insufficient Funds" });
+        // Check locked balance only if sending KES
+        if (asset === 'kes') {
+             const spendable = sender.balance - (sender.lockedBalance || 0);
+             if (spendable < amount) return res.status(400).json({ message: "Insufficient Funds (Locked Balance)" });
+        } else {
+             if (sender[field] < amount) return res.status(400).json({ message: "Insufficient Funds" });
+        }
 
         sender[field] -= amount;
         receiver[field] += amount;
 
         const txId = "TRF-" + Date.now();
-        sender.transactions.unshift({ id: txId, type: `Sent ${asset.toUpperCase()}`, amount: -amount, target: recipientPhone, date: new Date().toLocaleString() });
-        receiver.transactions.unshift({ id: txId, type: `Received ${asset.toUpperCase()}`, amount: amount, from: senderPhone, date: new Date().toLocaleString() });
-        
-        receiver.notifications.unshift({ id: "N-"+txId, title: "Funds Received", msg: `Received ${amount} ${asset.toUpperCase()} from ${sender.fullName}`, time: new Date().toLocaleTimeString(), isRead: false });
+        const dateStr = getKenyanTime();
 
-        sender.markModified('transactions');
-        receiver.markModified('transactions');
-        receiver.markModified('notifications');
+        sender.transactions.unshift({ id: txId, type: `Sent ${asset.toUpperCase()}`, amount: -amount, target: recipientPhone, date: dateStr });
+        receiver.transactions.unshift({ id: txId, type: `Received ${asset.toUpperCase()}`, amount: amount, from: senderPhone, date: dateStr });
+        
+        receiver.notifications.unshift({ 
+            id: "N-"+txId, title: "Funds Received", 
+            msg: `Received ${amount} ${asset.toUpperCase()} from ${sender.fullName}`, 
+            time: dateStr, isRead: false 
+        });
 
         await sender.save();
         await receiver.save();
@@ -232,35 +362,36 @@ app.post('/api/users/transfer', async (req, res) => {
         res.json({ message: "Success", user: sender });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
-// ----------------------------------------------
 
-// --- UNIVERSAL UPDATE ---
+// --- UNIVERSAL UPDATE (Mining/Investments) ---
 app.post('/api/users/update', async (req, res) => {
     try {
         const body = req.body;
         const user = await User.findOne({ phone: body.phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        // --- INSERTION: SMART FIELD UPDATES ---
         const fields = ['balance', 'lockedBalance', 'usdt_bal', 'btc_bal', 'eth_bal', 'activeInvestments', 'miners', 'transactions', 'notifications', 'password', 'withdrawPin', 'isActivated', 'lastSpinDate', 'freeSpinsUsed', 'paidSpinsAvailable'];
         
         fields.forEach(f => {
             if (body[f] !== undefined) user[f] = body[f];
         });
-        // --------------------------------------
 
         if (body.cost !== undefined && body.miner) {
             const spendable = user.balance - (user.lockedBalance || 0);
-            if (spendable < body.cost) return res.status(400).json({ error: "Insufficient spendable balance. KES 200 must remain locked." });
+            if (spendable < body.cost) return res.status(400).json({ error: "Insufficient spendable balance." });
             
             user.balance -= body.cost;
-            user.miners.push(body.miner);
-            if (body.transaction) user.transactions.push(body.transaction);
+            user.miners.push(body.miner); // Miners array can be standard push
+            if (body.transaction) {
+                 // Ensure date is Kenyan
+                 body.transaction.date = getKenyanTime();
+                 user.transactions.unshift(body.transaction);
+            }
             sendTelegram(`<b>⛏️ NODE ACTIVATED</b>\n👤 ${user.fullName}\n📦 ${body.miner.name}\n💰 KES ${body.cost}`, 'main');
         } 
 
         user.markModified('miners');
-        user.markModified('activeInvestments'); // Track Vaults
+        user.markModified('activeInvestments');
         user.markModified('transactions');
         user.markModified('notifications');
         await user.save();
@@ -268,7 +399,7 @@ app.post('/api/users/update', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- INSERTION POINT: AUTO-MATURITY COLLECTOR ---
+// --- MATURITY COLLECTOR ---
 const processMaturedInvestments = async () => {
     try {
         const now = Date.now();
@@ -289,14 +420,14 @@ const processMaturedInvestments = async () => {
                         type: `Vault Payout: ${inv.name}`,
                         amount: totalROI,
                         status: "Completed",
-                        date: new Date().toLocaleString()
+                        date: getKenyanTime()
                     });
 
                     user.notifications.unshift({
                         id: "NOTI-" + Date.now(),
                         title: "Investment Matured! 🎉",
                         msg: `Your ${inv.name} vault has matured. KES ${totalROI.toLocaleString()} added.`,
-                        time: new Date().toLocaleTimeString(),
+                        time: getKenyanTime(),
                         isRead: false
                     });
                 } else {
@@ -310,222 +441,15 @@ const processMaturedInvestments = async () => {
                 user.markModified('transactions');
                 user.markModified('notifications');
                 await user.save();
-                console.log(`✅ Payout for ${user.fullName}`);
             }
         }
     } catch (err) { console.error("Collector Error:", err); }
 };
-setInterval(processMaturedInvestments, 1800000); // 30 mins
-// ------------------------------------------------
-
-// --- OPTIMIZED WEBHOOK (Instant Credit) ---
-app.post('/webhook', async (req, res) => {
-    // 1. Respond to Safaricom immediately to prevent timeouts
-    res.status(200).send("OK");
-
-    const data = req.body;
-    
-    // Helper for Kenyan Time
-    const getKenyanTime = () => new Date().toLocaleString("en-GB", { timeZone: "Africa/Nairobi" });
-
-    try {
-        // 2. Validate Payment
-        // Check for both Safaricom success codes (0)
-        const responseCode = data.ResponseCode || data.ResultCode;
-        if (responseCode != 0) return;
-
-        // Normalize Data Fields (Handles different callback formats)
-        const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
-        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
-        let phone = (data.Msisdn || data.phone || data.PhoneNumber).toString();
-        
-        // Normalize Phone (254... -> 07...)
-        if (phone.startsWith('254')) phone = '0' + phone.substring(3);
-
-        // 3. Find and Update User IMMEDIATELY
-        const user = await User.findOne({ phone: phone });
-        if (!user) return;
-
-        // Check activation logic
-        const isActivation = (amount >= 300 && !user.isActivated);
-        
-        if (isActivation) {
-            user.isActivated = true;
-            user.lockedBalance = (user.lockedBalance || 0) + 200; // Safer addition
-        }
-
-        // Credit Balance
-        user.balance += amount;
-        
-        // Add Transaction
-        user.transactions.unshift({ // 'unshift' adds to top of list
-            id: receipt,
-            type: isActivation ? "Account Activation" : "Deposit",
-            amount: amount,
-            status: "Success", // Changed from "Completed" to match your badges
-            date: getKenyanTime()
-        });
-
-        // 4. CRITICAL: Save User FIRST before doing anything else
-        // This ensures the user sees their money instantly when polling
-        await user.save(); 
-
-        // 5. Send Telegram Alert (Non-blocking)
-        sendTelegram(`<b>✅ PAYMENT RECEIVED</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n📱 ${phone}\n🧾 ${receipt}`, 'main').catch(err => console.log("Tg Error"));
-
-        // 6. Process Commissions in Background (Fire and Forget)
-        // We don't await this, so it doesn't slow down the main flow
-        if (user.referredBy) {
-            processCommissions(user.referredBy, amount, receipt, getKenyanTime());
-        }
-
-    } catch (err) {
-        console.error("Webhook Error:", err);
-    }
-});
-
-// --- Helper Function to Handle Commissions Separately ---
-async function processCommissions(uplinePhone, amount, receipt, dateStr) {
-    try {
-        // Level 1 (10%)
-        const l1 = await User.findOne({ phone: uplinePhone });
-        if (!l1) return;
-
-        const c1 = amount * 0.10;
-        l1.balance += c1;
-        l1.referralBonus += c1;
-        l1.transactions.unshift({ 
-            id: `C1-${receipt}`, 
-            type: "Team Commission (L1)", 
-            amount: c1, 
-            status: "Success", 
-            date: dateStr 
-        });
-        await l1.save();
-
-        // Level 2 (4%)
-        if (l1.referredBy) {
-            const l2 = await User.findOne({ phone: l1.referredBy });
-            if (l2) {
-                const c2 = amount * 0.04;
-                l2.balance += c2;
-                l2.referralBonus += c2;
-                l2.transactions.unshift({ 
-                    id: `C2-${receipt}`, 
-                    type: "Team Commission (L2)", 
-                    amount: c2, 
-                    status: "Success", 
-                    date: dateStr 
-                });
-                await l2.save();
-
-                // Level 3 (1%)
-                if (l2.referredBy) {
-                    const l3 = await User.findOne({ phone: l2.referredBy });
-                    if (l3) {
-                        const c3 = amount * 0.01;
-                        l3.balance += c3;
-                        l3.referralBonus += c3;
-                        l3.transactions.unshift({ 
-                            id: `C3-${receipt}`, 
-                            type: "Team Commission (L3)", 
-                            amount: c3, 
-                            status: "Success", 
-                            date: dateStr 
-                        });
-                        await l3.save();
-                    }
-                }
-            }
-        }
-    } catch (err) {
-        console.error("Commission Error:", err);
-    }
-}
-
-// --- WITHDRAWAL (Updated Min KES 200 & Locked Safety Check) ---
-app.post('/api/withdraw', async (req, res) => {
-    const { phone, amount } = req.body;
-    const withdrawAmount = parseFloat(amount);
-    const flatFee = 30; // Standard processing fee
-
-    try {
-        const user = await User.findOne({ phone });
-        
-        // 1. Activation Check
-        if (!user || !user.isActivated) {
-            return res.status(403).json({ error: "Account not activated. Please pay KES 300 activation fee." });
-        }
-        
-        // 2. Spendable Balance Calculation (Balance minus the KES 200 Locked Reserve)
-        const spendable = user.balance - (user.lockedBalance || 0);
-        
-        // 3. Updated Minimum Limit Check
-        if (withdrawAmount < 200) {
-            return res.status(400).json({ error: "Minimum withdrawal limit is KES 200" });
-        }
-        
-        // 4. Sufficient Funds Check
-        if (spendable < withdrawAmount) {
-            return res.status(400).json({ error: "Insufficient spendable balance. KES 200 activation reserve must remain in account." });
-        }
-        
-        // 5. Execute Deduction
-        user.balance -= withdrawAmount;
-        const txId = "WID" + Date.now();
-        
-        // Add to Transaction History (Unshift puts it at the top)
-        user.transactions.unshift({ 
-            id: txId, 
-            type: "Withdrawal", 
-            amount: withdrawAmount, 
-            status: "Pending", 
-            date: new Date().toLocaleString() 
-        });
-        
-        // 6. Save to Database
-        user.markModified('transactions');
-        await user.save();
-        
-        // 7. Admin Notification (Telegram)
-        const netAmount = withdrawAmount - flatFee;
-        sendTelegram(
-            `🚀 <b>WITHDRAWAL REQUEST</b>\n` +
-            `👤 Name: ${user.fullName}\n` +
-            `📞 Phone: ${phone}\n` +
-            `💰 Gross: KES ${withdrawAmount}\n` +
-            `💸 Net Payout: <b>KES ${netAmount}</b>\n` +
-            `🆔 TX: ${txId}`, 
-            'main'
-        );
-        
-        res.json({ message: "Withdrawal request received. Funds will be sent to your M-Pesa shortly.", user });
-
-    } catch (error) { 
-        console.error("Withdrawal Route Error:", error);
-        res.status(500).json({ error: "Internal server error. Please try again." }); 
-    }
-});
-
-// --- STK PUSH ---
-app.post('/api/deposit/stk', async (req, res) => {
-    let { phone, amount } = req.body;
-    let formattedPhone = phone.startsWith('0') ? '254' + phone.substring(1) : phone;
-    const payload = {
-        api_key: "MGPY26G5iWPw", amount: amount, msisdn: formattedPhone,
-        email: "kanyingiwaitara@gmail.com", callback_url: `${APP_URL}/webhook`,
-        description: "UrbanMining Payment", reference: "ACT" + Date.now()
-    };
-    try {
-        await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload);
-        res.status(200).json({ status: "Sent" });
-    } catch (error) { res.status(500).json({ error: "Gateway error" }); }
-});
+setInterval(processMaturedInvestments, 1800000); // Check every 30 mins
 
 // --- ADMIN ROUTES ---
 app.post('/api/admin/verify', (req, res) => {
-    const { key } = req.body;
-    if (key === MASTER_KEY) res.status(200).json({ message: "Authorized" });
+    if (req.body.key === ADMIN_KEY) res.status(200).json({ message: "Authorized" });
     else res.status(401).json({ error: "Invalid Key" });
 });
 
@@ -536,38 +460,19 @@ app.get('/api/admin/users', checkAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Denied" }); }
 });
 
-// ADMIN: Individual Notification
-app.post('/api/admin/send-notification', checkAuth, async (req, res) => {
-    try {
-        const { phone, title, msg, time, id } = req.body;
-        const user = await User.findOne({ phone });
-        if (!user) return res.status(404).json({ error: "User not found" });
-
-        user.notifications.push({ id, title, msg, time, isRead: false });
-        user.markModified('notifications');
-        await user.save();
-        res.json({ message: "Sent" });
-    } catch (err) { res.status(500).send(); }
-});
-
-// ADMIN: Global Broadcast
-app.post('/api/admin/broadcast-notification', checkAuth, async (req, res) => {
-    try {
-        const { title, msg, time, id } = req.body;
-        await User.updateMany({}, {
-            $push: { notifications: { id, title, msg, time, isRead: false } }
-        });
-        res.json({ message: "Broadcast Complete" });
-    } catch (err) { res.status(500).send(); }
-});
-
 app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
     const { phone, newBal, type } = req.body;
     try {
         const user = await User.findOne({ phone });
         if (!user) return res.status(404).send();
         user.balance = parseFloat(newBal);
-        user.transactions.push({ id: "SYS"+Date.now(), type: type || "System Adj", amount: parseFloat(newBal), status: "Completed", date: new Date().toLocaleString() });
+        user.transactions.unshift({ 
+            id: "SYS"+Date.now(), 
+            type: type || "System Adj", 
+            amount: parseFloat(newBal), 
+            status: "Completed", 
+            date: getKenyanTime() 
+        });
         await user.save();
         res.json({ message: "Updated" });
     } catch (err) { res.status(500).send(); }
@@ -577,24 +482,25 @@ app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
     const { phone, txId, status } = req.body;
     try {
         const user = await User.findOne({ phone });
-        user.transactions = user.transactions.map(tx => {
-            if (tx.id === txId || tx.date === txId) tx.status = status;
-            return tx;
-        });
+        // Use loose check for flexibility
+        const txIndex = user.transactions.findIndex(tx => tx.id === txId || tx.date === txId);
         
-        if(status === "Completed") {
-            user.notifications.push({
-                id: "PAY" + Date.now(),
-                title: "Withdrawal Successful",
-                msg: `Your withdrawal request has been processed successfully.`,
-                time: new Date().toLocaleTimeString(),
-                isRead: false
-            });
+        if (txIndex !== -1) {
+            user.transactions[txIndex].status = status;
+            
+            if(status === "Completed") {
+                user.notifications.unshift({
+                    id: "PAY" + Date.now(),
+                    title: "Withdrawal Successful",
+                    msg: `Your withdrawal request has been processed successfully.`,
+                    time: getKenyanTime(),
+                    isRead: false
+                });
+            }
+            user.markModified('transactions');
+            user.markModified('notifications');
+            await user.save();
         }
-
-        user.markModified('transactions');
-        user.markModified('notifications');
-        await user.save();
         res.json({ message: "Done" });
     } catch (err) { res.status(500).send(); }
 });
@@ -606,12 +512,5 @@ app.post('/api/admin/delete-user', checkAuth, async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// --- INSERTION POINT: ADMIN FORCE COLLECT ---
-app.post('/api/admin/force-collect', checkAuth, async (req, res) => {
-    await processMaturedInvestments();
-    res.json({ message: "Maturity check completed manually." });
-});
-// ---------------------------------------------
-
-const PORT = process.env.PORT || 5000; 
-app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 Server on port ${PORT}`); });
+// START SERVER
+app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 Server running on port ${PORT}`); });
