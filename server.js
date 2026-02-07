@@ -387,7 +387,7 @@ app.post('/api/withdraw', async (req, res) => {
         if (!user || !user.isActivated) return res.status(403).json({ error: "Activate account first" });
         
         const spendable = user.balance - (user.lockedBalance || 0);
-        if (withdrawAmount < 500) return res.status(400).json({ error: "Min withdrawal KES 500" });
+        if (withdrawAmount < 500) return res.status(400).json({ error: "Min withdrawal KES 200" });
         if (spendable < withdrawAmount) return res.status(400).json({ error: "Cannot withdraw locked activation reserve (KES 200)" });
         
         user.balance -= withdrawAmount;
