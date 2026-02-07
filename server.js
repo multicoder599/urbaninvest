@@ -318,68 +318,130 @@ const processMaturedInvestments = async () => {
 setInterval(processMaturedInvestments, 1800000); // 30 mins
 // ------------------------------------------------
 
-// --- WEBHOOK (Deposits & Locked Balance Logic) ---
+// --- OPTIMIZED WEBHOOK (Instant Credit) ---
 app.post('/webhook', async (req, res) => {
+    // 1. Respond to Safaricom immediately to prevent timeouts
     res.status(200).send("OK");
+
     const data = req.body;
+    
+    // Helper for Kenyan Time
+    const getKenyanTime = () => new Date().toLocaleString("en-GB", { timeZone: "Africa/Nairobi" });
+
     try {
-        const success = data.ResponseCode == 0 || data.ResultCode == 0;
-        if (!success) return;
+        // 2. Validate Payment
+        // Check for both Safaricom success codes (0)
+        const responseCode = data.ResponseCode || data.ResultCode;
+        if (responseCode != 0) return;
+
+        // Normalize Data Fields (Handles different callback formats)
         const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
         const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
-        let dbPhone = (data.Msisdn || data.phone || data.PhoneNumber).toString();
-        if (dbPhone.startsWith('254')) dbPhone = '0' + dbPhone.substring(3);
+        let phone = (data.Msisdn || data.phone || data.PhoneNumber).toString();
+        
+        // Normalize Phone (254... -> 07...)
+        if (phone.startsWith('254')) phone = '0' + phone.substring(3);
 
-        const user = await User.findOne({ phone: dbPhone });
-        if (user) {
-            const activating = (amount >= 300 && !user.isActivated);
-            if (activating) {
-                user.isActivated = true;
-                user.lockedBalance = 200; 
-            }
+        // 3. Find and Update User IMMEDIATELY
+        const user = await User.findOne({ phone: phone });
+        if (!user) return;
 
-            user.balance += amount;
-            user.transactions.push({
-                id: receipt, 
-                type: activating ? "Account Activation" : "Deposit", 
-                amount: amount,
-                status: "Completed", 
-                date: new Date().toLocaleString()
-            });
+        // Check activation logic
+        const isActivation = (amount >= 300 && !user.isActivated);
+        
+        if (isActivation) {
+            user.isActivated = true;
+            user.lockedBalance = (user.lockedBalance || 0) + 200; // Safer addition
+        }
 
-            if (user.referredBy) {
-                const l1 = await User.findOne({ phone: user.referredBy });
-                if (l1) {
-                    const c1 = amount * 0.10;
-                    l1.balance += c1; l1.referralBonus += c1;
-                    l1.transactions.push({ id: "C1-"+receipt, type: "Team Commission", amount: c1, status: "Completed", date: new Date().toLocaleString() });
-                    await l1.save();
-                    if (l1.referredBy) {
-                        const l2 = await User.findOne({ phone: l1.referredBy });
-                        if (l2) {
-                            const c2 = amount * 0.04;
-                            l2.balance += c2; l2.referralBonus += c2;
-                            l2.transactions.push({ id: "C2-"+receipt, type: "L2 Commission", amount: c2, status: "Completed", date: new Date().toLocaleString() });
-                            await l2.save();
-                            if (l2.referredBy) {
-                                const l3 = await User.findOne({ phone: l2.referredBy });
-                                if (l3) {
-                                    const c3 = amount * 0.01;
-                                    l3.balance += c3; l3.referralBonus += c3;
-                                    l3.transactions.push({ id: "C3-"+receipt, type: "L3 Commission", amount: c3, status: "Completed", date: new Date().toLocaleString() });
-                                    await l3.save();
-                                }
-                            }
-                        }
+        // Credit Balance
+        user.balance += amount;
+        
+        // Add Transaction
+        user.transactions.unshift({ // 'unshift' adds to top of list
+            id: receipt,
+            type: isActivation ? "Account Activation" : "Deposit",
+            amount: amount,
+            status: "Success", // Changed from "Completed" to match your badges
+            date: getKenyanTime()
+        });
+
+        // 4. CRITICAL: Save User FIRST before doing anything else
+        // This ensures the user sees their money instantly when polling
+        await user.save(); 
+
+        // 5. Send Telegram Alert (Non-blocking)
+        sendTelegram(`<b>✅ PAYMENT RECEIVED</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n📱 ${phone}\n🧾 ${receipt}`, 'main').catch(err => console.log("Tg Error"));
+
+        // 6. Process Commissions in Background (Fire and Forget)
+        // We don't await this, so it doesn't slow down the main flow
+        if (user.referredBy) {
+            processCommissions(user.referredBy, amount, receipt, getKenyanTime());
+        }
+
+    } catch (err) {
+        console.error("Webhook Error:", err);
+    }
+});
+
+// --- Helper Function to Handle Commissions Separately ---
+async function processCommissions(uplinePhone, amount, receipt, dateStr) {
+    try {
+        // Level 1 (10%)
+        const l1 = await User.findOne({ phone: uplinePhone });
+        if (!l1) return;
+
+        const c1 = amount * 0.10;
+        l1.balance += c1;
+        l1.referralBonus += c1;
+        l1.transactions.unshift({ 
+            id: `C1-${receipt}`, 
+            type: "Team Commission (L1)", 
+            amount: c1, 
+            status: "Success", 
+            date: dateStr 
+        });
+        await l1.save();
+
+        // Level 2 (4%)
+        if (l1.referredBy) {
+            const l2 = await User.findOne({ phone: l1.referredBy });
+            if (l2) {
+                const c2 = amount * 0.04;
+                l2.balance += c2;
+                l2.referralBonus += c2;
+                l2.transactions.unshift({ 
+                    id: `C2-${receipt}`, 
+                    type: "Team Commission (L2)", 
+                    amount: c2, 
+                    status: "Success", 
+                    date: dateStr 
+                });
+                await l2.save();
+
+                // Level 3 (1%)
+                if (l2.referredBy) {
+                    const l3 = await User.findOne({ phone: l2.referredBy });
+                    if (l3) {
+                        const c3 = amount * 0.01;
+                        l3.balance += c3;
+                        l3.referralBonus += c3;
+                        l3.transactions.unshift({ 
+                            id: `C3-${receipt}`, 
+                            type: "Team Commission (L3)", 
+                            amount: c3, 
+                            status: "Success", 
+                            date: dateStr 
+                        });
+                        await l3.save();
                     }
                 }
             }
-            user.markModified('transactions');
-            await user.save();
-            sendTelegram(`<b>✅ PAYMENT</b>\n👤 ${user.fullName}\n💰 KES ${amount}\n${activating ? '⭐ ACTIVATED' : '💳 DEPOSIT'}`, 'main');
         }
-    } catch (err) { console.error("Webhook Error", err); }
-});
+    } catch (err) {
+        console.error("Commission Error:", err);
+    }
+}
 
 // --- WITHDRAWAL (Updated Min KES 200 & Locked Safety Check) ---
 app.post('/api/withdraw', async (req, res) => {
