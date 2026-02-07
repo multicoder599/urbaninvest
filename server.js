@@ -446,6 +446,40 @@ const processMaturedInvestments = async () => {
     } catch (err) { console.error("Collector Error:", err); }
 };
 setInterval(processMaturedInvestments, 1800000); // Check every 30 mins
+// --- FETCH NOTIFICATIONS ---
+app.get('/api/users/notifications', async (req, res) => {
+    try {
+        const { phone } = req.query;
+        const user = await User.findOne({ phone: phone });
+        
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // We send them back reversed so the newest appear at the top
+        res.json(user.notifications.slice().reverse());
+    } catch (err) {
+        res.status(500).json({ error: "Server error fetching notifications" });
+    }
+});
+
+// --- MARK ALL AS READ ---
+app.post('/api/users/notifications/read-all', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        const user = await User.findOne({ phone: phone });
+
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // Update all to isRead: true
+        user.notifications.forEach(n => { n.isRead = true; });
+        
+        user.markModified('notifications');
+        await user.save();
+        
+        res.json({ status: "success", message: "All notifications marked as read" });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to update notifications" });
+    }
+});
 
 // --- ADMIN ROUTES ---
 app.post('/api/admin/verify', (req, res) => {
