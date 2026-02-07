@@ -376,30 +376,68 @@ app.post('/webhook', async (req, res) => {
     } catch (err) { console.error("Webhook Error", err); }
 });
 
-// --- WITHDRAWAL (Locked Safety Check) ---
+// --- WITHDRAWAL (Updated Min KES 200 & Locked Safety Check) ---
 app.post('/api/withdraw', async (req, res) => {
     const { phone, amount } = req.body;
     const withdrawAmount = parseFloat(amount);
-    const flatFee = 30;
+    const flatFee = 30; // Standard processing fee
 
     try {
         const user = await User.findOne({ phone });
-        if (!user || !user.isActivated) return res.status(403).json({ error: "Activate account first" });
         
+        // 1. Activation Check
+        if (!user || !user.isActivated) {
+            return res.status(403).json({ error: "Account not activated. Please pay KES 300 activation fee." });
+        }
+        
+        // 2. Spendable Balance Calculation (Balance minus the KES 200 Locked Reserve)
         const spendable = user.balance - (user.lockedBalance || 0);
-        if (withdrawAmount < 500) return res.status(400).json({ error: "Min withdrawal KES 200" });
-        if (spendable < withdrawAmount) return res.status(400).json({ error: "Cannot withdraw locked activation reserve (KES 200)" });
         
+        // 3. Updated Minimum Limit Check
+        if (withdrawAmount < 200) {
+            return res.status(400).json({ error: "Minimum withdrawal limit is KES 200" });
+        }
+        
+        // 4. Sufficient Funds Check
+        if (spendable < withdrawAmount) {
+            return res.status(400).json({ error: "Insufficient spendable balance. KES 200 activation reserve must remain in account." });
+        }
+        
+        // 5. Execute Deduction
         user.balance -= withdrawAmount;
         const txId = "WID" + Date.now();
-        user.transactions.push({ id: txId, type: "Withdrawal", amount: withdrawAmount, status: "Pending", date: new Date().toLocaleString() });
         
+        // Add to Transaction History (Unshift puts it at the top)
+        user.transactions.unshift({ 
+            id: txId, 
+            type: "Withdrawal", 
+            amount: withdrawAmount, 
+            status: "Pending", 
+            date: new Date().toLocaleString() 
+        });
+        
+        // 6. Save to Database
         user.markModified('transactions');
         await user.save();
         
-        sendTelegram(`🚀 <b>WITHDRAWAL</b>\n👤 ${user.fullName}\n📞 ${phone}\n💰 KES ${withdrawAmount}\n💸 Net: KES ${withdrawAmount - flatFee}`, 'main');
-        res.json({ message: "Processing..." });
-    } catch (error) { res.status(500).send(); }
+        // 7. Admin Notification (Telegram)
+        const netAmount = withdrawAmount - flatFee;
+        sendTelegram(
+            `🚀 <b>WITHDRAWAL REQUEST</b>\n` +
+            `👤 Name: ${user.fullName}\n` +
+            `📞 Phone: ${phone}\n` +
+            `💰 Gross: KES ${withdrawAmount}\n` +
+            `💸 Net Payout: <b>KES ${netAmount}</b>\n` +
+            `🆔 TX: ${txId}`, 
+            'main'
+        );
+        
+        res.json({ message: "Withdrawal request received. Funds will be sent to your M-Pesa shortly.", user });
+
+    } catch (error) { 
+        console.error("Withdrawal Route Error:", error);
+        res.status(500).json({ error: "Internal server error. Please try again." }); 
+    }
 });
 
 // --- STK PUSH ---
