@@ -19,7 +19,7 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 3. DATA STRUCTURE (Updated with Notifications array)
+// 3. DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
     phone: { type: String, unique: true, required: true, index: true },
@@ -28,10 +28,18 @@ const userSchema = new mongoose.Schema({
     faceData: { type: Array, default: [] },
     balance: { type: Number, default: 0 }, 
     lockedBalance: { type: Number, default: 0 }, 
+
+    // --- INSERTION POINT: CRYPTO & PORTFOLIO FIELDS ---
+    usdt_bal: { type: Number, default: 0 },
+    btc_bal: { type: Number, default: 0 },
+    eth_bal: { type: Number, default: 0 },
+    activeInvestments: { type: Array, default: [] }, 
+    // --------------------------------------------------
+
     isActivated: { type: Boolean, default: false },
     miners: { type: Array, default: [] },
     transactions: { type: Array, default: [] },
-    notifications: { type: Array, default: [] }, // NEW: Stores user alerts
+    notifications: { type: Array, default: [] }, 
     referredBy: { type: String, default: null },
     team: { type: Array, default: [] },    
     teamL2: { type: Array, default: [] },  
@@ -134,6 +142,15 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
+// --- INSERTION POINT: GET USER BY PHONE ---
+app.get('/api/users/:phone', async (req, res) => {
+    try {
+        const user = await User.findOne({ phone: req.params.phone });
+        user ? res.json(user) : res.status(404).json({ error: "User not found" });
+    } catch (err) { res.status(500).send(); }
+});
+// ------------------------------------------
+
 app.get('/api/users/profile', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.query.phone });
@@ -146,7 +163,7 @@ app.get('/api/users/notifications', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.query.phone });
         if (!user) return res.status(404).json({ error: "User not found" });
-        res.json(user.notifications.reverse()); // Newest first
+        res.json(user.notifications.reverse()); 
     } catch (err) { res.status(500).send(); }
 });
 
@@ -178,37 +195,123 @@ app.post('/api/users/notifications/read-all', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
-// --- UNIVERSAL UPDATE (With Spendable Logic) ---
+// --- INSERTION POINT: INTERNAL P2P TRANSFERS ---
+app.post('/api/users/transfer', async (req, res) => {
+    const { senderPhone, recipientPhone, amount, asset } = req.body;
+    try {
+        const sender = await User.findOne({ phone: senderPhone });
+        const receiver = await User.findOne({ phone: recipientPhone });
+
+        if (!sender || !receiver) return res.status(404).json({ message: "Recipient not found" });
+        
+        let field = asset === 'kes' ? 'balance' : `${asset.toLowerCase()}_bal`;
+        if (sender[field] < amount) return res.status(400).json({ message: "Insufficient Funds" });
+
+        sender[field] -= amount;
+        receiver[field] += amount;
+
+        const txId = "TRF-" + Date.now();
+        sender.transactions.unshift({ id: txId, type: `Sent ${asset.toUpperCase()}`, amount: -amount, target: recipientPhone, date: new Date().toLocaleString() });
+        receiver.transactions.unshift({ id: txId, type: `Received ${asset.toUpperCase()}`, amount: amount, from: senderPhone, date: new Date().toLocaleString() });
+        
+        receiver.notifications.unshift({ id: "N-"+txId, title: "Funds Received", msg: `Received ${amount} ${asset.toUpperCase()} from ${sender.fullName}`, time: new Date().toLocaleTimeString(), isRead: false });
+
+        sender.markModified('transactions');
+        receiver.markModified('transactions');
+        receiver.markModified('notifications');
+
+        await sender.save();
+        await receiver.save();
+
+        sendTelegram(`<b>💸 TRANSFER</b>\n👤 ${sender.fullName} ➡️ ${receiver.fullName}\n💰 ${amount} ${asset.toUpperCase()}`, 'main');
+        res.json({ message: "Success", user: sender });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+// ----------------------------------------------
+
+// --- UNIVERSAL UPDATE ---
 app.post('/api/users/update', async (req, res) => {
     try {
-        const { phone, balance, miners, transactions, cost, miner, transaction, password, withdrawPin, isActivated, lockedBalance } = req.body;
-        const user = await User.findOne({ phone });
+        const body = req.body;
+        const user = await User.findOne({ phone: body.phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        if (cost !== undefined && miner) {
+        // --- INSERTION: SMART FIELD UPDATES ---
+        const fields = ['balance', 'lockedBalance', 'usdt_bal', 'btc_bal', 'eth_bal', 'activeInvestments', 'miners', 'transactions', 'notifications', 'password', 'withdrawPin', 'isActivated', 'lastSpinDate', 'freeSpinsUsed', 'paidSpinsAvailable'];
+        
+        fields.forEach(f => {
+            if (body[f] !== undefined) user[f] = body[f];
+        });
+        // --------------------------------------
+
+        if (body.cost !== undefined && body.miner) {
             const spendable = user.balance - (user.lockedBalance || 0);
-            if (spendable < cost) return res.status(400).json({ error: "Insufficient spendable balance. KES 200 must remain locked." });
+            if (spendable < body.cost) return res.status(400).json({ error: "Insufficient spendable balance. KES 200 must remain locked." });
             
-            user.balance -= cost;
-            user.miners.push(miner);
-            if (transaction) user.transactions.push(transaction);
-            sendTelegram(`<b>⛏️ NODE ACTIVATED</b>\n👤 ${user.fullName}\n📦 ${miner.name}\n💰 KES ${cost}`, 'main');
-        } else {
-            if (balance !== undefined) user.balance = balance;
-            if (miners !== undefined) user.miners = miners;
-            if (transactions !== undefined) user.transactions = transactions;
-            if (password !== undefined) user.password = password;
-            if (withdrawPin !== undefined) user.withdrawPin = withdrawPin;
-            if (isActivated !== undefined) user.isActivated = isActivated;
-            if (lockedBalance !== undefined) user.lockedBalance = lockedBalance;
-        }
+            user.balance -= body.cost;
+            user.miners.push(body.miner);
+            if (body.transaction) user.transactions.push(body.transaction);
+            sendTelegram(`<b>⛏️ NODE ACTIVATED</b>\n👤 ${user.fullName}\n📦 ${body.miner.name}\n💰 KES ${body.cost}`, 'main');
+        } 
 
         user.markModified('miners');
+        user.markModified('activeInvestments'); // Track Vaults
         user.markModified('transactions');
+        user.markModified('notifications');
         await user.save();
         res.json({ message: "Success", user });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// --- INSERTION POINT: AUTO-MATURITY COLLECTOR ---
+const processMaturedInvestments = async () => {
+    try {
+        const now = Date.now();
+        const users = await User.find({ "activeInvestments.0": { $exists: true } });
+
+        for (let user of users) {
+            let maturedFound = false;
+            let updatedInvestments = [];
+
+            user.activeInvestments.forEach(inv => {
+                if (now >= inv.endTime) {
+                    const totalROI = inv.principal + (inv.principal * inv.dailyRate * inv.tenure);
+                    user.balance += totalROI;
+                    maturedFound = true;
+
+                    user.transactions.unshift({
+                        id: "MAT-" + Date.now(),
+                        type: `Vault Payout: ${inv.name}`,
+                        amount: totalROI,
+                        status: "Completed",
+                        date: new Date().toLocaleString()
+                    });
+
+                    user.notifications.unshift({
+                        id: "NOTI-" + Date.now(),
+                        title: "Investment Matured! 🎉",
+                        msg: `Your ${inv.name} vault has matured. KES ${totalROI.toLocaleString()} added.`,
+                        time: new Date().toLocaleTimeString(),
+                        isRead: false
+                    });
+                } else {
+                    updatedInvestments.push(inv);
+                }
+            });
+
+            if (maturedFound) {
+                user.activeInvestments = updatedInvestments;
+                user.markModified('activeInvestments');
+                user.markModified('transactions');
+                user.markModified('notifications');
+                await user.save();
+                console.log(`✅ Payout for ${user.fullName}`);
+            }
+        }
+    } catch (err) { console.error("Collector Error:", err); }
+};
+setInterval(processMaturedInvestments, 1800000); // 30 mins
+// ------------------------------------------------
 
 // --- WEBHOOK (Deposits & Locked Balance Logic) ---
 app.post('/webhook', async (req, res) => {
@@ -374,7 +477,6 @@ app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
             return tx;
         });
         
-        // Auto-notify user that payment is completed
         if(status === "Completed") {
             user.notifications.push({
                 id: "PAY" + Date.now(),
@@ -398,6 +500,13 @@ app.post('/api/admin/delete-user', checkAuth, async (req, res) => {
         res.json({ message: "Deleted" });
     } catch (err) { res.status(500).send(); }
 });
+
+// --- INSERTION POINT: ADMIN FORCE COLLECT ---
+app.post('/api/admin/force-collect', checkAuth, async (req, res) => {
+    await processMaturedInvestments();
+    res.json({ message: "Maturity check completed manually." });
+});
+// ---------------------------------------------
 
 const PORT = process.env.PORT || 5000; 
 app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 Server on port ${PORT}`); });
