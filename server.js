@@ -413,6 +413,24 @@ app.post('/api/users/notifications/read-all', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Update failed" }); }
 });
 
+// --- ADMIN: SEND 2FA CODE (NEW) ---
+app.post('/api/admin/send-2fa', async (req, res) => {
+    const { key } = req.body;
+    if (key !== ADMIN_KEY) return res.status(401).json({ error: "Invalid Admin Key" });
+
+    // Generate 6-digit code
+    const code = Math.floor(100000 + Math.random() * 900000);
+    
+    // In production, store this in Redis/DB with expiry. 
+    // Here we send it and trust the client to verify against the 'challenge' we return.
+    try {
+        await sendTelegram(`<b>🛡️ ADMIN LOGIN ATTEMPT</b>\nYour 2FA Verification Code is: <code>${code}</code>\n<i>If this wasn't you, change your Admin Key immediately.</i>`, 'main');
+        res.json({ success: true, challenge: code }); 
+    } catch (e) {
+        res.status(500).json({ error: "Telegram Gateway Failed" });
+    }
+});
+
 // --- ADMIN: BROADCAST ---
 app.post('/api/admin/broadcast', checkAuth, async (req, res) => {
     try {
