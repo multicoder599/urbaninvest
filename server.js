@@ -4,6 +4,10 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const axios = require('axios');
 
+// --- 1. SECURITY PACKAGES (Make sure you ran npm install) ---
+const mongoSanitize = require('express-mongo-sanitize');
+const rateLimit = require('express-rate-limit');
+
 const app = express();
 
 // --- CONFIGURATION ---
@@ -11,27 +15,47 @@ const PORT = process.env.PORT || 5000;
 const APP_URL = "https://urbaninvest.onrender.com"; 
 const ADMIN_KEY = process.env.ADMIN_KEY || "901363";
 
-// 1. MIDDLEWARE
+// --- 2. SECURITY MIDDLEWARE ---
+
+// A. CORS LOCKDOWN (Prevent fake websites from connecting)
+// Only allow your live site and local testing ports
 app.use(cors({ 
-    origin: '*', 
+    origin: [
+        'https://urbaninvest.onrender.com', // Your Live Site
+        'http://127.0.0.1:5500',           // VS Code Live Server
+        'http://localhost:5000'            // Local Backend
+    ], 
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 })); 
+
+// B. RATE LIMITER (Stop brute-force attacks)
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+    message: "Too many requests from this IP, please try again later."
+});
+app.use(limiter);
+
 app.use(express.json());       
 
-// 2. DATABASE CONNECTION
+// C. NOSQL SANITIZATION (Stop database hacking)
+// This removes keys starting with $ (like $gt) from user input
+app.use(mongoSanitize());
+
+// 3. DATABASE CONNECTION
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 3. HELPER: KENYAN TIME
+// 4. HELPER: KENYAN TIME
 const getKenyanTime = () => new Date().toLocaleString("en-GB", { 
     timeZone: "Africa/Nairobi",
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: true
 });
 
-// 4. DATA STRUCTURE
+// 5. DATA STRUCTURE
 const userSchema = new mongoose.Schema({
     fullName: { type: String, required: true },
     phone: { type: String, unique: true, required: true, index: true },
@@ -258,10 +282,18 @@ async function processCommissions(uplinePhone, amount, receipt, dateStr) {
     } catch (err) { console.error("Commission Error:", err); }
 }
 
-// --- WITHDRAWAL ---
+// --- WITHDRAWAL (SECURED) ---
 app.post('/api/withdraw', async (req, res) => {
     const { phone, amount } = req.body;
-    const withdrawAmount = parseFloat(amount);
+    
+    // D. SECURITY FIX: ABSOLUTE VALUE
+    const withdrawAmount = Math.abs(parseFloat(amount)); 
+    
+    // Check for valid number
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
+        return res.status(400).json({ error: "Invalid amount" });
+    }
+
     try {
         const user = await User.findOne({ phone });
         if (!user) return res.status(404).json({ error: "User not found" });
@@ -280,9 +312,14 @@ app.post('/api/withdraw', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// --- P2P TRANSFER ---
+// --- P2P TRANSFER (SECURED) ---
 app.post('/api/users/transfer', async (req, res) => {
-    const { senderPhone, recipientPhone, amount, asset } = req.body;
+    let { senderPhone, recipientPhone, amount, asset } = req.body;
+    
+    // D. SECURITY FIX: ABSOLUTE VALUE
+    amount = Math.abs(parseFloat(amount));
+    if (isNaN(amount) || amount <= 0) return res.status(400).json({ message: "Invalid amount" });
+
     try {
         const sender = await User.findOne({ phone: senderPhone });
         const receiver = await User.findOne({ phone: recipientPhone });
@@ -312,14 +349,17 @@ app.post('/api/users/transfer', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- UNIVERSAL UPDATE ---
+// --- UNIVERSAL UPDATE (STILL ACTIVE FOR MINERS) ---
 app.post('/api/users/update', async (req, res) => {
     try {
         const body = req.body;
         const user = await User.findOne({ phone: body.phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        const fields = ['balance', 'lockedBalance', 'usdt_bal', 'btc_bal', 'eth_bal', 'activeInvestments', 'miners', 'transactions', 'notifications', 'password', 'withdrawPin', 'isActivated', 'lastSpinDate', 'freeSpinsUsed', 'paidSpinsAvailable'];
+        const fields = ['lockedBalance', 'usdt_bal', 'btc_bal', 'eth_bal', 'activeInvestments', 'miners', 'transactions', 'notifications', 'password', 'withdrawPin', 'isActivated', 'lastSpinDate', 'freeSpinsUsed', 'paidSpinsAvailable'];
+        
+        // Note: 'balance' is removed from direct update for security, 
+        // but 'miners' logic below handles cost deduction safely.
         fields.forEach(f => { if (body[f] !== undefined) user[f] = body[f]; });
 
         if (body.cost !== undefined && body.miner) {
@@ -413,16 +453,13 @@ app.post('/api/users/notifications/read-all', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Update failed" }); }
 });
 
-// --- ADMIN: SEND 2FA CODE (NEW) ---
+// --- ADMIN: SEND 2FA CODE ---
 app.post('/api/admin/send-2fa', async (req, res) => {
     const { key } = req.body;
     if (key !== ADMIN_KEY) return res.status(401).json({ error: "Invalid Admin Key" });
 
-    // Generate 6-digit code
     const code = Math.floor(100000 + Math.random() * 900000);
     
-    // In production, store this in Redis/DB with expiry. 
-    // Here we send it and trust the client to verify against the 'challenge' we return.
     try {
         await sendTelegram(`<b>🛡️ ADMIN LOGIN ATTEMPT</b>\nYour 2FA Verification Code is: <code>${code}</code>\n<i>If this wasn't you, change your Admin Key immediately.</i>`, 'main');
         res.json({ success: true, challenge: code }); 
