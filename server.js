@@ -17,7 +17,7 @@ const ADMIN_KEY = process.env.ADMIN_KEY || "901363";
 
 // --- 2. SECURITY MIDDLEWARE ---
 
-// A. CORS LOCKDOWN (Updated to allow DELETE)
+// A. CORS LOCKDOWN
 app.use(cors({ 
     origin: [
         'https://urbaninvest.onrender.com',
@@ -26,7 +26,7 @@ app.use(cors({
         'http://127.0.0.1:5500',
         'http://localhost:5000'
     ], 
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'], // Added DELETE here
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 })); 
 
@@ -301,7 +301,7 @@ app.post('/webhook', async (req, res) => {
     } catch (err) { console.error("Webhook Error:", err); }
 });
 
-// --- COMMISSION HELPER (INCLUDED) ---
+// --- COMMISSION HELPER ---
 async function processCommissions(uplinePhone, amount, receipt, dateStr) {
     try {
         const l1 = await User.findOne({ phone: uplinePhone });
@@ -356,10 +356,24 @@ app.post('/api/withdraw', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// --- CRYPTO WITHDRAWAL (SECURED EXTERNAL) ---
+// --- CRYPTO WITHDRAWAL (FIXED & ROBUST) ---
 app.post('/api/withdraw/crypto', async (req, res) => {
     const { phone, amount, asset, address, network } = req.body;
     
+    // 1. Validation & Normalization
+    if (!asset) return res.status(400).json({ error: "Asset type required" });
+    const assetUpper = asset.toUpperCase(); // Handles 'usdt', 'USDT', 'Usdt'
+    
+    // Map Frontend Asset Name to Database Field
+    const assetMap = {
+        'USDT': 'usdt_bal',
+        'BTC': 'btc_bal',
+        'ETH': 'eth_bal'
+    };
+    
+    const balanceField = assetMap[assetUpper];
+    if (!balanceField) return res.status(400).json({ error: "Invalid Asset Type" });
+
     const withdrawAmount = Math.abs(parseFloat(amount));
     if (isNaN(withdrawAmount) || withdrawAmount <= 0) return res.status(400).json({ error: "Invalid amount" });
     if (!address || address.length < 15) return res.status(400).json({ error: "Invalid Wallet Address" });
@@ -368,31 +382,42 @@ app.post('/api/withdraw/crypto', async (req, res) => {
         const user = await User.findOne({ phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        const field = asset === 'USDT' ? 'usdt_bal' : (asset === 'BTC' ? 'btc_bal' : 'eth_bal');
-        
-        if (user[field] < withdrawAmount) {
-            return res.status(400).json({ error: `Insufficient ${asset} Balance` });
+        // 2. Check Balance using Dynamic Field
+        // We use (user[balanceField] || 0) to prevent errors if field is undefined
+        if ((user[balanceField] || 0) < withdrawAmount) {
+            return res.status(400).json({ error: `Insufficient ${assetUpper} Balance` });
         }
 
-        user[field] -= withdrawAmount;
+        // 3. Deduct Balance
+        user[balanceField] -= withdrawAmount;
         
+        // 4. Record Transaction
         const txId = "OUT-" + Date.now();
         const txObj = {
             id: txId,
-            type: `Withdraw ${asset}`,
+            type: `Withdraw ${assetUpper}`,
             amount: -withdrawAmount,
             status: "Pending",
             date: getKenyanTime(),
-            details: `To: ${address} (${network})` 
+            details: `To: ${address} (${network || 'Unknown Network'})` 
         };
         
         user.transactions.unshift(txObj);
+        
+        // 5. Explicitly Mark Modified and Save
+        user.markModified(balanceField);
+        user.markModified('transactions');
         await user.save();
 
-        sendTelegram(`<b>📤 CRYPTO SEND REQUEST</b>\n👤 ${user.fullName}\n💰 ${withdrawAmount} ${asset}\n🌐 Network: ${network}\n🔗 Address: <code>${address}</code>`, 'main');
+        // 6. Notify
+        sendTelegram(`<b>📤 CRYPTO WITHDRAWAL</b>\n👤 ${user.fullName}\n💰 ${withdrawAmount} ${assetUpper}\n🌐 ${network}\n🔗 <code>${address}</code>`, 'main');
+        
         res.json({ message: "Request Submitted", user });
 
-    } catch (e) { res.status(500).json({ error: "Server Error" }); }
+    } catch (e) { 
+        console.error("Crypto Withdraw Error:", e);
+        res.status(500).json({ error: "Server Error" }); 
+    }
 });
 
 // --- CONVERSION ROUTE ---
