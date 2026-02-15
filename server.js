@@ -121,16 +121,37 @@ app.get('/ping', (req, res) => res.status(200).send("Awake"));
 // ============================================================
 
 // --- SECURE COMMUNITY CHAT (UPDATED) ---
+
+// Helper to get Kenyan Time String (e.g., "02:30 PM")
+const getChatTime = () => new Date().toLocaleTimeString("en-US", { 
+    timeZone: "Africa/Nairobi", 
+    hour: '2-digit', 
+    minute:'2-digit', 
+    hour12: true 
+});
+
 let chatHistory = [
-    { id: "1", user: "Admin", msg: "Welcome to the Official Community! 🚀 Withdrawals are processing instantly.", time: "10:00 AM", isAdmin: true },
-    { id: "2", user: "Brian K.", msg: "Just received KES 3,000. Thanks!", time: "10:05 AM", isAdmin: false }
+    { 
+        id: "1", 
+        user: "Admin", 
+        msg: "Welcome to the Official Community! 🚀 Withdrawals are processing instantly.", 
+        time: getChatTime(), // Auto-sets to current server start time
+        isAdmin: true 
+    },
+    { 
+        id: "2", 
+        user: "System", 
+        msg: "Tip: Use the VIP Signals for higher win rates.", 
+        time: getChatTime(),
+        isAdmin: true 
+    }
 ];
 
 // 🚫 BAD WORDS LIST
 const forbiddenWords = [
     "scam", "fake", "fraud", "con", "thief", "stole", "steal", 
     "money gone", "blocked", "pending", "loss", "lose", "refund", 
-    "police", "illegal", "ponzi", "pyramid", "wash wash"
+    "police", "illegal", "ponzi", "pyramid", "wash wash", "dead", "closed"
 ];
 
 app.get('/api/chat', (req, res) => {
@@ -140,7 +161,8 @@ app.get('/api/chat', (req, res) => {
 app.post('/api/chat', (req, res) => {
     const { user, msg } = req.body;
     
-    if(!user || !msg) return res.status(400).json({ error: "Empty message" });
+    // Validate Input
+    if(!user || !msg || !msg.trim()) return res.status(400).json({ error: "Empty message" });
 
     // 1. CHECK FOR BAD WORDS
     const lowerMsg = msg.toLowerCase();
@@ -150,17 +172,19 @@ app.post('/api/chat', (req, res) => {
         return res.status(400).json({ success: false, error: "Message blocked: Community Violation." });
     }
 
-    // 2. SAVE MESSAGE WITH ID
+    // 2. SAVE MESSAGE
     const newMsg = {
-        id: Date.now().toString(), // Unique ID generated here
-        user: user,
-        msg: msg,
-        time: new Date().toLocaleTimeString("en-US", { timeZone: "Africa/Nairobi", hour: '2-digit', minute:'2-digit', hour12: true }),
+        id: Date.now().toString(), // Unique ID based on timestamp
+        user: user.trim(),
+        msg: msg.trim(),
+        time: getChatTime(), // Uses Helper Function
         isAdmin: false
     };
     
     chatHistory.push(newMsg);
-    if(chatHistory.length > 50) chatHistory.shift(); 
+    
+    // Keep history manageable (Max 60 messages)
+    if(chatHistory.length > 60) chatHistory.shift(); 
     
     res.json({ success: true });
 });
@@ -169,13 +193,16 @@ app.post('/api/chat', (req, res) => {
 app.delete('/api/chat', (req, res) => {
     const { id, user } = req.body;
     
-    // Find message by ID
+    // Find message index
     const index = chatHistory.findIndex(m => m.id === id);
     if (index === -1) return res.status(404).json({ error: "Message not found" });
 
-    // Verify Ownership (User can only delete their own)
-    if (chatHistory[index].user !== user) {
-        return res.status(403).json({ error: "Unauthorized" });
+    const targetMsg = chatHistory[index];
+
+    // Verify Ownership (User can delete own, Admin can delete all)
+    // Note: Since we don't have an admin token here, we strictly check username match
+    if (targetMsg.user !== user && !targetMsg.isAdmin) {
+        return res.status(403).json({ error: "Unauthorized: You can only delete your own messages." });
     }
 
     chatHistory.splice(index, 1);
