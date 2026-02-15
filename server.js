@@ -396,6 +396,44 @@ app.post('/api/convert', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- GAME TRANSACTION ROUTE (Fixes Games Not Paying) ---
+app.post('/api/game/transaction', async (req, res) => {
+    const { phone, bet, winAmount, gameName } = req.body;
+    
+    // 1. Validation
+    const betVal = Math.abs(parseFloat(bet) || 0);
+    const winVal = Math.abs(parseFloat(winAmount) || 0);
+
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // 2. Check Balance for Bet
+        if (user.balance < betVal) {
+            return res.status(400).json({ error: "Insufficient Balance" });
+        }
+
+        // 3. EXECUTE MATH (Deduct Bet + Add Win)
+        user.balance = user.balance - betVal + winVal;
+
+        // 4. Record Transaction
+        const netResult = winVal - betVal;
+        const type = netResult >= 0 ? "Game Win" : "Game Loss";
+        
+        user.transactions.unshift({
+            id: "GM-" + Date.now(),
+            type: `${gameName || 'Game'} (${type})`,
+            amount: netResult,
+            status: "Completed",
+            date: getKenyanTime()
+        });
+
+        await user.save();
+        res.json({ message: "Game Saved", newBalance: user.balance });
+
+    } catch (e) { res.status(500).json({ error: "Server Error" }); }
+});
+
 // --- P2P TRANSFER (SECURED) ---
 app.post('/api/users/transfer', async (req, res) => {
     let { senderPhone, recipientPhone, amount, asset } = req.body;
