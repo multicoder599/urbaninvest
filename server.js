@@ -120,6 +120,55 @@ app.get('/ping', (req, res) => res.status(200).send("Awake"));
 //                     CORE API ROUTES
 // ============================================================
 
+// --- SECURE COMMUNITY CHAT (NEW) ---
+let chatHistory = [
+    { user: "Admin", msg: "Welcome to the Official Community! 🚀 Withdrawals are processing instantly.", time: "10:00 AM", isAdmin: true },
+    { user: "Brian K.", msg: "Just received KES 3,000. Thanks!", time: "10:05 AM", isAdmin: false },
+    { user: "Sarah W.", msg: "Aviator signals are accurate today.", time: "10:12 AM", isAdmin: false }
+];
+
+// 🚫 BAD WORDS LIST (The Ban Hammer)
+const forbiddenWords = [
+    "scam", "fake", "fraud", "con", "thief", "stole", "steal", 
+    "money gone", "blocked", "pending", "loss", "lose", "refund", 
+    "police", "illegal", "ponzi", "pyramid", "wash wash"
+];
+
+app.get('/api/chat', (req, res) => {
+    res.json(chatHistory);
+});
+
+app.post('/api/chat', (req, res) => {
+    const { user, msg } = req.body;
+    
+    if(!user || !msg) return res.status(400).json({ error: "Empty message" });
+
+    // 1. CHECK FOR BAD WORDS
+    const lowerMsg = msg.toLowerCase();
+    const isToxic = forbiddenWords.some(word => lowerMsg.includes(word));
+
+    if (isToxic) {
+        // Return error to user, do NOT save message
+        return res.status(400).json({ 
+            success: false, 
+            error: "Message blocked: Violation of Community Guidelines." 
+        });
+    }
+
+    // 2. IF CLEAN, SAVE MESSAGE
+    const newMsg = {
+        user: user,
+        msg: msg, // Save original casing
+        time: new Date().toLocaleTimeString("en-US", { timeZone: "Africa/Nairobi", hour: '2-digit', minute:'2-digit', hour12: true }),
+        isAdmin: false
+    };
+    
+    chatHistory.push(newMsg);
+    if(chatHistory.length > 50) chatHistory.shift(); // Keep chat fast
+    
+    res.json({ success: true });
+});
+
 // --- REGISTRATION ---
 app.post('/api/register', async (req, res) => {
     try {
