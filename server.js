@@ -120,14 +120,13 @@ app.get('/ping', (req, res) => res.status(200).send("Awake"));
 //                     CORE API ROUTES
 // ============================================================
 
-// --- SECURE COMMUNITY CHAT (NEW) ---
+// --- SECURE COMMUNITY CHAT (UPDATED) ---
 let chatHistory = [
-    { user: "Admin", msg: "Welcome to the Official Community! 🚀 Withdrawals are processing instantly.", time: "10:00 AM", isAdmin: true },
-    { user: "Brian K.", msg: "Just received KES 3,000. Thanks!", time: "10:05 AM", isAdmin: false },
-    { user: "Sarah W.", msg: "Aviator signals are accurate today.", time: "10:12 AM", isAdmin: false }
+    { id: "1", user: "Admin", msg: "Welcome to the Official Community! 🚀 Withdrawals are processing instantly.", time: "10:00 AM", isAdmin: true },
+    { id: "2", user: "Brian K.", msg: "Just received KES 3,000. Thanks!", time: "10:05 AM", isAdmin: false }
 ];
 
-// 🚫 BAD WORDS LIST (The Ban Hammer)
+// 🚫 BAD WORDS LIST
 const forbiddenWords = [
     "scam", "fake", "fraud", "con", "thief", "stole", "steal", 
     "money gone", "blocked", "pending", "loss", "lose", "refund", 
@@ -148,24 +147,38 @@ app.post('/api/chat', (req, res) => {
     const isToxic = forbiddenWords.some(word => lowerMsg.includes(word));
 
     if (isToxic) {
-        // Return error to user, do NOT save message
-        return res.status(400).json({ 
-            success: false, 
-            error: "Message blocked: Violation of Community Guidelines." 
-        });
+        return res.status(400).json({ success: false, error: "Message blocked: Community Violation." });
     }
 
-    // 2. IF CLEAN, SAVE MESSAGE
+    // 2. SAVE MESSAGE WITH ID
     const newMsg = {
+        id: Date.now().toString(), // Unique ID generated here
         user: user,
-        msg: msg, // Save original casing
+        msg: msg,
         time: new Date().toLocaleTimeString("en-US", { timeZone: "Africa/Nairobi", hour: '2-digit', minute:'2-digit', hour12: true }),
         isAdmin: false
     };
     
     chatHistory.push(newMsg);
-    if(chatHistory.length > 50) chatHistory.shift(); // Keep chat fast
+    if(chatHistory.length > 50) chatHistory.shift(); 
     
+    res.json({ success: true });
+});
+
+// 3. DELETE MESSAGE ROUTE
+app.delete('/api/chat', (req, res) => {
+    const { id, user } = req.body;
+    
+    // Find message by ID
+    const index = chatHistory.findIndex(m => m.id === id);
+    if (index === -1) return res.status(404).json({ error: "Message not found" });
+
+    // Verify Ownership (User can only delete their own)
+    if (chatHistory[index].user !== user) {
+        return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    chatHistory.splice(index, 1);
     res.json({ success: true });
 });
 
