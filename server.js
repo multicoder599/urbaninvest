@@ -17,16 +17,16 @@ const ADMIN_KEY = process.env.ADMIN_KEY || "901363";
 
 // --- 2. SECURITY MIDDLEWARE ---
 
-// A. CORS LOCKDOWN
+// A. CORS LOCKDOWN (Updated to allow DELETE)
 app.use(cors({ 
     origin: [
-        'https://urbaninvest.onrender.com',      // Render Backend
-        'https://urbancapital.co.ke',            // Your Custom Domain
-        'https://www.urbancapital.co.ke',        // Your Custom Domain (www)
-        'http://127.0.0.1:5500',                 // Local Testing
-        'http://localhost:5000'                  // Local Backend
+        'https://urbaninvest.onrender.com',
+        'https://urbancapital.co.ke',
+        'https://www.urbancapital.co.ke',
+        'http://127.0.0.1:5500',
+        'http://localhost:5000'
     ], 
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'], // Added DELETE here
     allowedHeaders: ['Content-Type', 'Authorization']
 })); 
 
@@ -48,11 +48,16 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ CONNECTED TO MONGODB ATLAS"))
     .catch(err => console.log("❌ CONNECTION ERROR:", err));
 
-// 4. HELPER: KENYAN TIME
+// 4. HELPERS
 const getKenyanTime = () => new Date().toLocaleString("en-GB", { 
     timeZone: "Africa/Nairobi",
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: true
+});
+
+const getChatTime = () => new Date().toLocaleTimeString("en-US", { 
+    timeZone: "Africa/Nairobi", 
+    hour: '2-digit', minute:'2-digit', hour12: true 
 });
 
 // 5. DATA STRUCTURE
@@ -112,59 +117,23 @@ const checkAuth = (req, res, next) => {
     else res.status(401).json({ error: "Unauthorized Access" });
 };
 
-// --- KEEP-ALIVE ---
-setInterval(() => { axios.get(`${APP_URL}/ping`).catch(() => {}); }, 840000); 
-app.get('/ping', (req, res) => res.status(200).send("Awake"));
-
-// ============================================================
-//                     CORE API ROUTES
-// ============================================================
-
-// --- SECURE COMMUNITY CHAT (UPDATED) ---
-
-// Helper to get Kenyan Time String (e.g., "02:30 PM")
-const getChatTime = () => new Date().toLocaleTimeString("en-US", { 
-    timeZone: "Africa/Nairobi", 
-    hour: '2-digit', 
-    minute:'2-digit', 
-    hour12: true 
-});
-
+// --- CHAT STATE ---
 let chatHistory = [
-    { 
-        id: "1", 
-        user: "Admin", 
-        msg: "Welcome to the Official Community! 🚀 Withdrawals are processing instantly.", 
-        time: getChatTime(), // Auto-sets to current server start time
-        isAdmin: true 
-    },
-    { 
-        id: "2", 
-        user: "System", 
-        msg: "Tip: Use the VIP Signals for higher win rates.", 
-        time: getChatTime(),
-        isAdmin: true 
-    }
+    { id: "1", user: "Admin", msg: "Welcome to the Official Community! 🚀 Withdrawals are processing instantly.", time: getChatTime(), isAdmin: true }
 ];
 
-// 🚫 BAD WORDS LIST
-const forbiddenWords = [
-    "scam", "fake", "fraud", "con", "thief", "stole", "steal", 
-    "money gone", "blocked", "pending", "loss", "lose", "refund", 
-    "police", "illegal", "ponzi", "pyramid", "wash wash", "dead", "closed"
-];
+const forbiddenWords = ["scam", "fake", "fraud", "con", "thief", "stole", "steal", "money gone", "blocked", "pending", "loss", "lose", "refund", "police", "illegal", "ponzi", "pyramid", "wash wash", "dead", "closed"];
 
-app.get('/api/chat', (req, res) => {
-    res.json(chatHistory);
-});
+// ============================================================
+//                      CORE API ROUTES
+// ============================================================
+
+app.get('/api/chat', (req, res) => res.json(chatHistory));
 
 app.post('/api/chat', (req, res) => {
     const { user, msg } = req.body;
-    
-    // Validate Input
     if(!user || !msg || !msg.trim()) return res.status(400).json({ error: "Empty message" });
-
-    // 1. CHECK FOR BAD WORDS
+    
     const lowerMsg = msg.toLowerCase();
     const isToxic = forbiddenWords.some(word => lowerMsg.includes(word));
 
@@ -172,36 +141,27 @@ app.post('/api/chat', (req, res) => {
         return res.status(400).json({ success: false, error: "Message blocked: Community Violation." });
     }
 
-    // 2. SAVE MESSAGE
     const newMsg = {
-        id: Date.now().toString(), // Unique ID based on timestamp
+        id: Date.now().toString(),
         user: user.trim(),
         msg: msg.trim(),
-        time: getChatTime(), // Uses Helper Function
+        time: getChatTime(),
         isAdmin: false
     };
     
     chatHistory.push(newMsg);
-    
-    // Keep history manageable (Max 60 messages)
     if(chatHistory.length > 60) chatHistory.shift(); 
-    
     res.json({ success: true });
 });
 
-// 3. DELETE MESSAGE ROUTE
+// USER DELETE (Self-Delete)
 app.delete('/api/chat', (req, res) => {
     const { id, user } = req.body;
-    
-    // Find message index
     const index = chatHistory.findIndex(m => m.id === id);
     if (index === -1) return res.status(404).json({ error: "Message not found" });
 
     const targetMsg = chatHistory[index];
-
-    // Verify Ownership (User can delete own, Admin can delete all)
-    // Note: Since we don't have an admin token here, we strictly check username match
-    if (targetMsg.user !== user && !targetMsg.isAdmin) {
+    if (targetMsg.user !== user) {
         return res.status(403).json({ error: "Unauthorized: You can only delete your own messages." });
     }
 
@@ -341,7 +301,7 @@ app.post('/webhook', async (req, res) => {
     } catch (err) { console.error("Webhook Error:", err); }
 });
 
-// --- COMMISSION HELPER ---
+// --- COMMISSION HELPER (INCLUDED) ---
 async function processCommissions(uplinePhone, amount, receipt, dateStr) {
     try {
         const l1 = await User.findOne({ phone: uplinePhone });
@@ -435,12 +395,11 @@ app.post('/api/withdraw/crypto', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// --- CONVERSION ROUTE (FIXED: DEDUCTS BALANCE) ---
+// --- CONVERSION ROUTE ---
 app.post('/api/convert', async (req, res) => {
     const { phone, fromAsset, toAsset, amount } = req.body;
     const qty = parseFloat(amount);
 
-    // Sync these rates with your frontend
     const RATES = { 
         'KES_USDT': 1/134.50, 'USDT_KES': 134.50,
         'KES_BTC': 1/12800000, 'BTC_KES': 12800000,
@@ -451,26 +410,21 @@ app.post('/api/convert', async (req, res) => {
         const user = await User.findOne({ phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        // Map frontend asset names to DB fields
         const assetMap = { 'kes': 'balance', 'usdt': 'usdt_bal', 'btc': 'btc_bal', 'eth': 'eth_bal' };
         const sourceField = assetMap[fromAsset];
         const targetField = assetMap[toAsset];
 
-        // 1. CHECK BALANCE
         if (user[sourceField] < qty) return res.status(400).json({ error: "Insufficient Balance" });
 
-        // 2. CALCULATE CONVERSION
         const pair = `${fromAsset.toUpperCase()}_${toAsset.toUpperCase()}`;
         const rate = RATES[pair];
         if (!rate) return res.status(400).json({ error: "Invalid Pair" });
         
         const convertedAmt = qty * rate;
 
-        // 3. EXECUTE SWAP (Deduct Source, Add Target)
-        user[sourceField] -= qty;          
+        user[sourceField] -= qty;           
         user[targetField] += convertedAmt; 
 
-        // 4. LOG TRANSACTION
         user.transactions.unshift({
             id: "CNV-" + Date.now(),
             type: `Convert ${fromAsset.toUpperCase()} to ${toAsset.toUpperCase()}`,
@@ -485,11 +439,10 @@ app.post('/api/convert', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- GAME TRANSACTION ROUTE (Fixes Games Not Paying) ---
+// --- GAME TRANSACTION ROUTE ---
 app.post('/api/game/transaction', async (req, res) => {
     const { phone, bet, winAmount, gameName } = req.body;
     
-    // 1. Validation
     const betVal = Math.abs(parseFloat(bet) || 0);
     const winVal = Math.abs(parseFloat(winAmount) || 0);
 
@@ -497,15 +450,11 @@ app.post('/api/game/transaction', async (req, res) => {
         const user = await User.findOne({ phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        // 2. Check Balance for Bet
         if (user.balance < betVal) {
             return res.status(400).json({ error: "Insufficient Balance" });
         }
 
-        // 3. EXECUTE MATH (Deduct Bet + Add Win)
         user.balance = user.balance - betVal + winVal;
-
-        // 4. Record Transaction
         const netResult = winVal - betVal;
         const type = netResult >= 0 ? "Game Win" : "Game Loss";
         
@@ -523,7 +472,7 @@ app.post('/api/game/transaction', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// --- P2P TRANSFER (SECURED) ---
+// --- P2P TRANSFER ---
 app.post('/api/users/transfer', async (req, res) => {
     let { senderPhone, recipientPhone, amount, asset } = req.body;
     amount = Math.abs(parseFloat(amount));
@@ -558,7 +507,7 @@ app.post('/api/users/transfer', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- UNIVERSAL UPDATE (STILL ACTIVE FOR MINERS) ---
+// --- UNIVERSAL UPDATE ---
 app.post('/api/users/update', async (req, res) => {
     try {
         const body = req.body;
@@ -588,7 +537,7 @@ app.post('/api/users/update', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- UNIVERSAL MATURITY COLLECTOR ---
+// --- MATURITY COLLECTOR ---
 const processAllMaturities = async () => {
     try {
         const now = Date.now();
@@ -639,7 +588,7 @@ const processAllMaturities = async () => {
 };
 setInterval(processAllMaturities, 1800000);
 
-// --- NOTIFICATION ROUTES ---
+// --- NOTIFICATIONS ---
 app.get('/api/users/notifications', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.query.phone });
@@ -659,86 +608,105 @@ app.post('/api/users/notifications/read-all', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Update failed" }); }
 });
 
-// --- ADMIN: SEND 2FA CODE ---
+// ============================================================
+//                  ADMIN PANEL ROUTES (FINAL FIXES)
+// ============================================================
+
+app.post('/api/admin/verify', (req, res) => {
+    if (req.body.key === ADMIN_KEY) res.json({ message: "Authorized" });
+    else res.status(401).json({ error: "Invalid Key" });
+});
+
+app.get('/api/admin/users', checkAuth, async (req, res) => {
+    const users = await User.find({}).sort({ createdAt: -1 });
+    res.json(users);
+});
+
+app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
+    const { phone, newBal, type } = req.body;
+    const user = await User.findOne({ phone });
+    if (!user) return res.status(404).send();
+    user.balance = parseFloat(newBal);
+    user.transactions.unshift({ id: "SYS"+Date.now(), type: type || "System Adj", amount: parseFloat(newBal), status: "Completed", date: getKenyanTime() });
+    await user.save();
+    res.json({ message: "Updated" });
+});
+
+// FIX 1: MARK PAID using strict ID Check
+app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
+    const { phone, txId, status } = req.body;
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // STRICT FIND BY ID
+        const idx = user.transactions.findIndex(tx => tx.id === txId);
+        if (idx !== -1) {
+            user.transactions[idx].status = status;
+            if(status === "Completed") {
+                user.notifications.unshift({ 
+                    id: "PAY"+Date.now(), 
+                    title: "Withdrawal Success", 
+                    msg: "Your withdrawal has been processed successfully.", 
+                    time: getKenyanTime(), 
+                    isRead: false 
+                });
+            }
+            user.markModified('transactions');
+            user.markModified('notifications');
+            await user.save();
+            res.json({ message: "Status Updated" });
+        } else { res.status(404).json({ error: "Transaction not found" }); }
+    } catch (e) { res.status(500).send(); }
+});
+
+// FIX 2: ADMIN CHAT DELETE (By ID)
+app.delete('/api/admin/chat/delete', checkAuth, (req, res) => {
+    const { id } = req.body;
+    const index = chatHistory.findIndex(m => m.id === id);
+    if (index === -1) return res.status(404).json({ error: "Message not found" });
+    chatHistory.splice(index, 1);
+    res.json({ success: true, message: "Removed by Admin" });
+});
+
+// FIX 3: BROADCAST (Syncs to Chat)
+app.post('/api/admin/broadcast', checkAuth, async (req, res) => {
+    try {
+        const { title, msg } = req.body;
+        const bObj = { id: "BC-"+Date.now(), title: title || "Alert", msg, time: getKenyanTime(), isRead: false };
+        
+        // Notify All Users
+        await User.updateMany({}, { $push: { notifications: bObj } });
+        
+        // Post to Community Chat
+        chatHistory.push({ 
+            id: "ADM-BC-"+Date.now(), 
+            user: "Admin", 
+            msg: `📢 ${msg}`, 
+            time: getChatTime(), 
+            isAdmin: true 
+        });
+        
+        res.json({ message: "Broadcast Sent" });
+    } catch (e) { res.status(500).send(); }
+});
+
+app.post('/api/admin/delete-user', checkAuth, async (req, res) => {
+    await User.findOneAndDelete({ phone: req.body.phone });
+    res.json({ message: "Deleted" });
+});
+
+// --- ADMIN 2FA ---
 app.post('/api/admin/send-2fa', async (req, res) => {
     const { key } = req.body;
     if (key !== ADMIN_KEY) return res.status(401).json({ error: "Invalid Admin Key" });
 
     const code = Math.floor(100000 + Math.random() * 900000);
-    
     try {
-        await sendTelegram(`<b>🛡️ ADMIN LOGIN ATTEMPT</b>\nYour 2FA Verification Code is: <code>${code}</code>\n<i>If this wasn't you, change your Admin Key immediately.</i>`, 'main');
+        await sendTelegram(`<b>🛡️ ADMIN LOGIN ATTEMPT</b>\nCode: <code>${code}</code>`, 'main');
         res.json({ success: true, challenge: code }); 
-    } catch (e) {
-        res.status(500).json({ error: "Telegram Gateway Failed" });
-    }
+    } catch (e) { res.status(500).json({ error: "Telegram Gateway Failed" }); }
 });
 
-// --- ADMIN: BROADCAST ---
-app.post('/api/admin/broadcast', checkAuth, async (req, res) => {
-    try {
-        const { title, msg } = req.body;
-        const broadcastObj = {
-            id: "BC-" + Date.now(),
-            title: title || "System Announcement",
-            msg: msg,
-            time: getKenyanTime(),
-            isRead: false
-        };
-        await User.updateMany({}, { $push: { notifications: broadcastObj } });
-        res.json({ message: "Broadcast sent successfully to all users." });
-    } catch (err) { res.status(500).json({ error: "Broadcast failed" }); }
-});
-
-// --- ADMIN: GENERAL ---
-app.post('/api/admin/verify', (req, res) => {
-    if (req.body.key === ADMIN_KEY) res.status(200).json({ message: "Authorized" });
-    else res.status(401).json({ error: "Invalid Key" });
-});
-
-app.get('/api/admin/users', checkAuth, async (req, res) => {
-    try {
-        const users = await User.find({}).sort({ createdAt: -1 });
-        res.json(users);
-    } catch (err) { res.status(500).json({ error: "Denied" }); }
-});
-
-app.post('/api/admin/adjust-balance', checkAuth, async (req, res) => {
-    const { phone, newBal, type } = req.body;
-    try {
-        const user = await User.findOne({ phone });
-        if (!user) return res.status(404).send();
-        user.balance = parseFloat(newBal);
-        user.transactions.unshift({ id: "SYS"+Date.now(), type: type || "System Adj", amount: parseFloat(newBal), status: "Completed", date: getKenyanTime() });
-        await user.save();
-        res.json({ message: "Updated" });
-    } catch (err) { res.status(500).send(); }
-});
-
-app.post('/api/admin/mark-paid', checkAuth, async (req, res) => {
-    const { phone, txId, status } = req.body;
-    try {
-        const user = await User.findOne({ phone });
-        const txIndex = user.transactions.findIndex(tx => tx.id === txId || tx.date === txId);
-        if (txIndex !== -1) {
-            user.transactions[txIndex].status = status;
-            if(status === "Completed") {
-                user.notifications.unshift({ id: "PAY" + Date.now(), title: "Withdrawal Success", msg: `Your withdrawal request has been processed.`, time: getKenyanTime(), isRead: false });
-            }
-            user.markModified('transactions');
-            user.markModified('notifications');
-            await user.save();
-        }
-        res.json({ message: "Done" });
-    } catch (err) { res.status(500).send(); }
-});
-
-app.post('/api/admin/delete-user', checkAuth, async (req, res) => {
-    try {
-        await User.findOneAndDelete({ phone: req.body.phone });
-        res.json({ message: "Deleted" });
-    } catch (err) { res.status(500).send(); }
-});
-
-// START SERVER
-app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 Server running on port ${PORT}`); });
+// START
+app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 Server running on Port ${PORT}`); });
