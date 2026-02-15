@@ -613,6 +613,85 @@ const processAllMaturities = async () => {
 };
 setInterval(processAllMaturities, 1800000);
 
+// --- AUTOMATIC MINING PAYOUT SYSTEM (RUNS 24/7) ---
+const processMiningEarnings = async () => {
+    console.log("⛏️ Checking Mining Earnings...");
+    const dayMs = 24 * 60 * 60 * 1000; // 24 Hours in milliseconds
+
+    try {
+        // Find users who have at least one miner
+        const users = await User.find({ miners: { $exists: true, $not: { $size: 0 } } });
+
+        for (let user of users) {
+            let userModified = false;
+            const now = Date.now();
+
+            user.miners.forEach(miner => {
+                // Determine the last time this miner paid out
+                // If lastCredit doesn't exist, use startTime
+                let lastPay = miner.lastCredit || miner.startTime;
+                
+                // Calculate how much time has passed
+                let elapsed = now - lastPay;
+
+                // Check if at least 24 hours have passed
+                if (elapsed >= dayMs) {
+                    // Calculate how many FULL days have passed
+                    const cycles = Math.floor(elapsed / dayMs);
+                    const dailyRate = parseFloat(miner.daily || 0);
+                    const totalPay = dailyRate * cycles;
+
+                    if (totalPay > 0) {
+                        // 1. Add to Balance
+                        user.balance = (user.balance || 0) + totalPay;
+
+                        // 2. Update the miner's lastCredit time
+                        // We add exactly 24h * cycles to keep the timing precise
+                        miner.lastCredit = lastPay + (cycles * dayMs);
+
+                        // 3. Create Transaction Record
+                        user.transactions.unshift({
+                            id: "AUTO-MINE-" + Date.now() + Math.floor(Math.random() * 1000),
+                            type: `Auto Yield: ${miner.name} (x${cycles})`,
+                            amount: totalPay,
+                            status: "Completed",
+                            date: getKenyanTime()
+                        });
+
+                        // 4. (Optional) Send Notification
+                        user.notifications.unshift({
+                            id: "NT-" + Date.now(),
+                            title: "Mining Earnings Received 💰",
+                            msg: `You earned KES ${totalPay} from ${miner.name}`,
+                            time: getKenyanTime(),
+                            isRead: false
+                        });
+
+                        userModified = true;
+                        console.log(`✅ Paid ${user.phone}: KES ${totalPay}`);
+                    }
+                }
+            });
+
+            if (userModified) {
+                user.markModified('miners');
+                user.markModified('transactions');
+                user.markModified('notifications');
+                await user.save();
+            }
+        }
+    } catch (err) {
+        console.error("Mining Processor Error:", err);
+    }
+};
+
+// Run this check every 10 minutes (600,000 ms)
+setInterval(processMiningEarnings, 600000);
+
+// Run immediately on server start
+processMiningEarnings();
+
+
 // --- NOTIFICATIONS ---
 app.get('/api/users/notifications', async (req, res) => {
     try {
