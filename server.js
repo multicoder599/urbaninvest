@@ -17,7 +17,7 @@ const ADMIN_KEY = process.env.ADMIN_KEY || "901363";
 
 // --- 2. SECURITY MIDDLEWARE ---
 
-// A. CORS LOCKDOWN (Updated for Custom Domain)
+// A. CORS LOCKDOWN
 app.use(cors({ 
     origin: [
         'https://urbaninvest.onrender.com',      // Render Backend
@@ -307,7 +307,7 @@ app.post('/api/withdraw', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// --- CRYPTO WITHDRAWAL (NEW) ---
+// --- CRYPTO WITHDRAWAL (SECURED EXTERNAL) ---
 app.post('/api/withdraw/crypto', async (req, res) => {
     const { phone, amount, asset, address, network } = req.body;
     
@@ -344,6 +344,56 @@ app.post('/api/withdraw/crypto', async (req, res) => {
         res.json({ message: "Request Submitted", user });
 
     } catch (e) { res.status(500).json({ error: "Server Error" }); }
+});
+
+// --- CONVERSION ROUTE (FIXED: DEDUCTS BALANCE) ---
+app.post('/api/convert', async (req, res) => {
+    const { phone, fromAsset, toAsset, amount } = req.body;
+    const qty = parseFloat(amount);
+
+    // Sync these rates with your frontend
+    const RATES = { 
+        'KES_USDT': 1/134.50, 'USDT_KES': 134.50,
+        'KES_BTC': 1/12800000, 'BTC_KES': 12800000,
+        'KES_ETH': 1/485000,   'ETH_KES': 485000
+    };
+
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // Map frontend asset names to DB fields
+        const assetMap = { 'kes': 'balance', 'usdt': 'usdt_bal', 'btc': 'btc_bal', 'eth': 'eth_bal' };
+        const sourceField = assetMap[fromAsset];
+        const targetField = assetMap[toAsset];
+
+        // 1. CHECK BALANCE
+        if (user[sourceField] < qty) return res.status(400).json({ error: "Insufficient Balance" });
+
+        // 2. CALCULATE CONVERSION
+        const pair = `${fromAsset.toUpperCase()}_${toAsset.toUpperCase()}`;
+        const rate = RATES[pair];
+        if (!rate) return res.status(400).json({ error: "Invalid Pair" });
+        
+        const convertedAmt = qty * rate;
+
+        // 3. EXECUTE SWAP (Deduct Source, Add Target)
+        user[sourceField] -= qty;          
+        user[targetField] += convertedAmt; 
+
+        // 4. LOG TRANSACTION
+        user.transactions.unshift({
+            id: "CNV-" + Date.now(),
+            type: `Convert ${fromAsset.toUpperCase()} to ${toAsset.toUpperCase()}`,
+            amount: -qty,
+            status: "Completed",
+            date: getKenyanTime()
+        });
+
+        await user.save();
+        res.json({ message: "Conversion Successful", user });
+
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- P2P TRANSFER (SECURED) ---
