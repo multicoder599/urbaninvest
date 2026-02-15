@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const axios = require('axios');
 
-// --- 1. SECURITY PACKAGES (Make sure you ran npm install) ---
+// --- 1. SECURITY PACKAGES ---
 const mongoSanitize = require('express-mongo-sanitize');
 const rateLimit = require('express-rate-limit');
 
@@ -17,30 +17,30 @@ const ADMIN_KEY = process.env.ADMIN_KEY || "901363";
 
 // --- 2. SECURITY MIDDLEWARE ---
 
-// A. CORS LOCKDOWN (Prevent fake websites from connecting)
-// Only allow your live site and local testing ports
+// A. CORS LOCKDOWN (Updated for Custom Domain)
 app.use(cors({ 
     origin: [
-        'https://urbaninvest.onrender.com', // Your Live Site
-        'http://127.0.0.1:5500',           // VS Code Live Server
-        'http://localhost:5000'            // Local Backend
+        'https://urbaninvest.onrender.com',      // Render Backend
+        'https://urbancapital.co.ke',            // Your Custom Domain
+        'https://www.urbancapital.co.ke',        // Your Custom Domain (www)
+        'http://127.0.0.1:5500',                 // Local Testing
+        'http://localhost:5000'                  // Local Backend
     ], 
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 })); 
 
-// B. RATE LIMITER (Stop brute-force attacks)
+// B. RATE LIMITER
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per windowMs
+    windowMs: 15 * 60 * 1000, 
+    max: 100, 
     message: "Too many requests from this IP, please try again later."
 });
 app.use(limiter);
 
 app.use(express.json());       
 
-// C. NOSQL SANITIZATION (Stop database hacking)
-// This removes keys starting with $ (like $gt) from user input
+// C. NOSQL SANITIZATION
 app.use(mongoSanitize());
 
 // 3. DATABASE CONNECTION
@@ -282,17 +282,12 @@ async function processCommissions(uplinePhone, amount, receipt, dateStr) {
     } catch (err) { console.error("Commission Error:", err); }
 }
 
-// --- WITHDRAWAL (SECURED) ---
+// --- WITHDRAWAL (SECURED KES) ---
 app.post('/api/withdraw', async (req, res) => {
     const { phone, amount } = req.body;
-    
-    // D. SECURITY FIX: ABSOLUTE VALUE
     const withdrawAmount = Math.abs(parseFloat(amount)); 
     
-    // Check for valid number
-    if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-    }
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) return res.status(400).json({ error: "Invalid amount" });
 
     try {
         const user = await User.findOne({ phone });
@@ -312,11 +307,48 @@ app.post('/api/withdraw', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Server Error" }); }
 });
 
+// --- CRYPTO WITHDRAWAL (NEW) ---
+app.post('/api/withdraw/crypto', async (req, res) => {
+    const { phone, amount, asset, address, network } = req.body;
+    
+    const withdrawAmount = Math.abs(parseFloat(amount));
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) return res.status(400).json({ error: "Invalid amount" });
+    if (!address || address.length < 15) return res.status(400).json({ error: "Invalid Wallet Address" });
+
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        const field = asset === 'USDT' ? 'usdt_bal' : (asset === 'BTC' ? 'btc_bal' : 'eth_bal');
+        
+        if (user[field] < withdrawAmount) {
+            return res.status(400).json({ error: `Insufficient ${asset} Balance` });
+        }
+
+        user[field] -= withdrawAmount;
+        
+        const txId = "OUT-" + Date.now();
+        const txObj = {
+            id: txId,
+            type: `Withdraw ${asset}`,
+            amount: -withdrawAmount,
+            status: "Pending",
+            date: getKenyanTime(),
+            details: `To: ${address} (${network})` 
+        };
+        
+        user.transactions.unshift(txObj);
+        await user.save();
+
+        sendTelegram(`<b>📤 CRYPTO SEND REQUEST</b>\n👤 ${user.fullName}\n💰 ${withdrawAmount} ${asset}\n🌐 Network: ${network}\n🔗 Address: <code>${address}</code>`, 'main');
+        res.json({ message: "Request Submitted", user });
+
+    } catch (e) { res.status(500).json({ error: "Server Error" }); }
+});
+
 // --- P2P TRANSFER (SECURED) ---
 app.post('/api/users/transfer', async (req, res) => {
     let { senderPhone, recipientPhone, amount, asset } = req.body;
-    
-    // D. SECURITY FIX: ABSOLUTE VALUE
     amount = Math.abs(parseFloat(amount));
     if (isNaN(amount) || amount <= 0) return res.status(400).json({ message: "Invalid amount" });
 
@@ -357,9 +389,6 @@ app.post('/api/users/update', async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found" });
 
         const fields = ['lockedBalance', 'usdt_bal', 'btc_bal', 'eth_bal', 'activeInvestments', 'miners', 'transactions', 'notifications', 'password', 'withdrawPin', 'isActivated', 'lastSpinDate', 'freeSpinsUsed', 'paidSpinsAvailable'];
-        
-        // Note: 'balance' is removed from direct update for security, 
-        // but 'miners' logic below handles cost deduction safely.
         fields.forEach(f => { if (body[f] !== undefined) user[f] = body[f]; });
 
         if (body.cost !== undefined && body.miner) {
