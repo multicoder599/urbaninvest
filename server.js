@@ -383,7 +383,6 @@ app.post('/api/withdraw/crypto', async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found" });
 
         // 2. Check Balance using Dynamic Field
-        // We use (user[balanceField] || 0) to prevent errors if field is undefined
         if ((user[balanceField] || 0) < withdrawAmount) {
             return res.status(400).json({ error: `Insufficient ${assetUpper} Balance` });
         }
@@ -539,7 +538,8 @@ app.post('/api/users/update', async (req, res) => {
         const user = await User.findOne({ phone: body.phone });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        const fields = ['lockedBalance', 'usdt_bal', 'btc_bal', 'eth_bal', 'activeInvestments', 'miners', 'transactions', 'notifications', 'password', 'withdrawPin', 'isActivated', 'lastSpinDate', 'freeSpinsUsed', 'paidSpinsAvailable'];
+        // ✅ FIX: Added 'balance' to this list so refunds successfully save to the database
+        const fields = ['balance', 'lockedBalance', 'usdt_bal', 'btc_bal', 'eth_bal', 'activeInvestments', 'miners', 'transactions', 'notifications', 'password', 'withdrawPin', 'isActivated', 'lastSpinDate', 'freeSpinsUsed', 'paidSpinsAvailable'];
         fields.forEach(f => { if (body[f] !== undefined) user[f] = body[f]; });
 
         if (body.cost !== undefined && body.miner) {
@@ -812,5 +812,30 @@ app.post('/api/admin/send-2fa', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Telegram Gateway Failed" }); }
 });
 
-// START
+
+// ============================================================
+//               KEEP-ALIVE SYSTEM (PREVENT SLEEP)
+// ============================================================
+
+// Lightweight endpoint just for pinging
+app.get('/ping', (req, res) => {
+    res.status(200).send("Server is awake! 🚀");
+});
+
+// The self-pinging function
+const keepAlive = async () => {
+    try {
+        await axios.get(`${APP_URL}/ping`);
+        console.log(`[Keep-Alive] 🟢 Pinged successfully at ${new Date().toLocaleTimeString()}`);
+    } catch (error) {
+        console.error(`[Keep-Alive] 🔴 Ping failed:`, error.message);
+    }
+};
+
+// Trigger the ping every 10 minutes (600,000 milliseconds)
+setInterval(keepAlive, 600000); 
+
+// ============================================================
+// START SERVER
+// ============================================================
 app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 Server running on Port ${PORT}`); });
