@@ -495,6 +495,67 @@ app.post('/api/game/transaction', async (req, res) => {
 
     } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
+// --- SECURE PREMIUM SPIN ROUTE ---
+app.post('/api/game/spin', async (req, res) => {
+    const { phone } = req.body;
+
+    try {
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // 1. Validate Spin Availability
+        if (user.paidSpinsAvailable <= 0) {
+            return res.status(400).json({ error: "No spins remaining. Please buy more." });
+        }
+
+        // 2. Deduct 1 Spin
+        user.paidSpinsAvailable -= 1;
+
+        // 3. SECURE MATH LOGIC (Profitable 50% House Edge)
+        const roll = Math.random() * 100;
+        let winAmt = 0;
+
+        if(roll < 85) { 
+            const opts = [5, 10, 15];
+            winAmt = opts[Math.floor(Math.random()*opts.length)];
+        } else if (roll < 98) { 
+            const opts = [20, 30];
+            winAmt = opts[Math.floor(Math.random()*opts.length)];
+        } else if (roll < 99.8) {
+            winAmt = 50;
+        } else { 
+            const opts = [1500, 2000, 2500]; 
+            winAmt = opts[Math.floor(Math.random()*opts.length)];
+        }
+
+        // 4. Update Balance
+        user.balance += winAmt;
+
+        // 5. Create Transaction Record
+        user.transactions.unshift({
+            id: "SPIN-" + Date.now(),
+            type: "Premium Spin Reward",
+            amount: winAmt,
+            status: "Completed",
+            date: getKenyanTime()
+        });
+
+        // 6. Save Modifications
+        user.markModified('transactions');
+        await user.save();
+
+        // 7. Send Result Back to Frontend
+        res.json({ 
+            winAmount: winAmt, 
+            newBalance: user.balance, 
+            spinsRemaining: user.paidSpinsAvailable 
+        });
+
+    } catch (e) { 
+        console.error("Spin Error:", e);
+        res.status(500).json({ error: "Server Error" }); 
+    }
+});
 
 // --- P2P TRANSFER ---
 app.post('/api/users/transfer', async (req, res) => {
