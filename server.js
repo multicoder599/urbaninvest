@@ -69,6 +69,8 @@ const userSchema = new mongoose.Schema({
     faceData: { type: Array, default: [] },
     balance: { type: Number, default: 0 }, 
     lockedBalance: { type: Number, default: 0 }, 
+    
+    isBanned: { type: Boolean, default: false }, // 👈 ADDED BAN FLAG
 
     // Crypto & Assets
     usdt_bal: { type: Number, default: 0 },
@@ -226,7 +228,12 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.body.phone, password: req.body.password });
-        user ? res.json(user) : res.status(401).json({ error: "Invalid login credentials" });
+        if (!user) return res.status(401).json({ error: "Invalid login credentials" });
+        
+        // 👈 Block banned users from logging in
+        if (user.isBanned) return res.status(403).json({ error: "BANNED" });
+        
+        res.json(user);
     } catch (err) { res.status(500).send(); }
 });
 
@@ -234,7 +241,12 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/users/profile', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.query.phone });
-        user ? res.json(user) : res.status(404).send();
+        if (!user) return res.status(404).send();
+        
+        // 👈 Boot banned users out during background syncs
+        if (user.isBanned) return res.status(403).json({ error: "BANNED" });
+        
+        res.json(user);
     } catch (err) { res.status(500).send(); }
 });
 
@@ -495,6 +507,7 @@ app.post('/api/game/transaction', async (req, res) => {
 
     } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
+
 // --- SECURE PREMIUM SPIN ROUTE ---
 app.post('/api/game/spin', async (req, res) => {
     const { phone } = req.body;
@@ -856,9 +869,18 @@ app.post('/api/admin/broadcast', checkAuth, async (req, res) => {
     } catch (e) { res.status(500).send(); }
 });
 
-app.post('/api/admin/delete-user', checkAuth, async (req, res) => {
-    await User.findOneAndDelete({ phone: req.body.phone });
-    res.json({ message: "Deleted" });
+// --- ADMIN BAN USER (Replaced Delete) ---
+app.post('/api/admin/ban-user', checkAuth, async (req, res) => {
+    try {
+        const user = await User.findOne({ phone: req.body.phone });
+        if (!user) return res.status(404).json({ error: "User not found" });
+        
+        user.isBanned = true; // Sets the ban flag instead of deleting
+        await user.save();
+        res.json({ message: "User has been permanently banned." });
+    } catch (err) { 
+        res.status(500).send(); 
+    }
 });
 
 // --- ADMIN 2FA ---
